@@ -1,0 +1,39 @@
+name: Kifas E2E Gate
+description: Trigger a Kifas run and block until it completes. Exit code is the gate — 0 pass, 1 fail.
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  api-key:
+    description: Kifas API key (store as a secret).
+    required: true
+  target-url:
+    description: URL of the deployed preview to test (e.g. the PR deploy URL).
+    required: false
+    default: ''
+  app-artifact:
+    description: Name or path of the app artifact to test (mobile builds, etc.).
+    required: false
+    default: ''
+  environment:
+    description: Logical environment label forwarded to the run (e.g. staging, preview).
+    required: false
+    default: ''
+  api-base:
+    description: Kifas API base URL.
+    required: false
+    default: https://api.kifas.io
+
+runs:
+  using: composite
+  steps:
+    - name: Run Kifas E2E gate
+      shell: bash
+      run: bash "${{ github.action_path }}/run.sh"
+      env:
+        KIFAS_API_KEY: ${{ inputs.api-key }}
+        KIFAS_TARGET_URL: ${{ inputs.target-url }}
+        KIFAS_APP_ARTIFACT: ${{ inputs.app-artifact }}
+        KIFAS_ENVIRONMENT: ${{ inputs.environment }}
+        KIFAS_API_BASE: ${{ inputs.api-base }}
