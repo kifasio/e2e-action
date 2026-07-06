@@ -157,6 +157,47 @@ else
   (( FAIL++ )) || true
 fi
 
+# Case 7: with a GitHub token + step summary → posts the sticky comment, writes
+# the summary, and still gates on success. Mock curl order: trigger, list(started),
+# post, poll(completed), list(final), patch.
+RESP7="${TMP_DIR}/responses_notify.txt"
+cat > "${RESP7}" << 'EOF'
+{"run_id":"run-007","poll_url":"/v1/github/runs/run-007/status","run_url":"https://app.kifas.io/acme/web/runs/run-007"}
+[]
+{"id":1}
+{"status":"completed","conclusion":"success","run_url":"https://app.kifas.io/acme/web/runs/run-007"}
+[{"id":1,"body":"<!-- kifas-e2e-run --> started"}]
+{}
+EOF
+SUMMARY7="${TMP_DIR}/summary7.md"
+: > "${SUMMARY7}"
+mock_curl7="${TMP_DIR}/curl_notify"
+make_mock_curl "${mock_curl7}"
+actual_exit=0
+env \
+  KIFAS_API_KEY="test-key-123" \
+  KIFAS_API_BASE="https://mock.kifas.io" \
+  KIFAS_POLL_INTERVAL_S="0" \
+  KIFAS_TIMEOUT_S="60" \
+  KIFAS_CURL="${mock_curl7}" \
+  MOCK_CURL_RESPONSES_FILE="${RESP7}" \
+  KIFAS_GITHUB_TOKEN="ghtok" \
+  GITHUB_API_URL="https://mock.github" \
+  GITHUB_STEP_SUMMARY="${SUMMARY7}" \
+  GITHUB_REPOSITORY="acme/web" \
+  GITHUB_SHA="abc123def456" \
+  GITHUB_REF_NAME="feature" \
+  GITHUB_RUN_ID="99" \
+  GITHUB_REF="refs/pull/7/merge" \
+  bash "${RUN_SH}" >/dev/null 2>&1 || actual_exit=$?
+if [[ "${actual_exit}" -eq 0 ]] && grep -q "passed" "${SUMMARY7}" && grep -q "run-007" "${SUMMARY7}"; then
+  echo "  PASS  notify_with_token_posts_and_summarizes"
+  (( PASS++ )) || true
+else
+  echo "  FAIL  notify_with_token_posts_and_summarizes  (exit=${actual_exit})"
+  (( FAIL++ )) || true
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

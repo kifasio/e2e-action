@@ -24,6 +24,13 @@ inputs:
     description: Kifas API base URL.
     required: false
     default: https://api.kifas.io
+  github-token:
+    description: >-
+      Token used to post the run link + result as a PR comment. Defaults to the
+      workflow's GITHUB_TOKEN; the job needs `permissions: pull-requests: write`.
+      Leave empty to skip PR comments (the run still gates via exit code).
+    required: false
+    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -37,3 +44,4 @@ runs:
         KIFAS_APP_ARTIFACT: ${{ inputs.app-artifact }}
         KIFAS_ENVIRONMENT: ${{ inputs.environment }}
         KIFAS_API_BASE: ${{ inputs.api-base }}
+        KIFAS_GITHUB_TOKEN: ${{ inputs.github-token }}

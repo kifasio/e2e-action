@@ -5,6 +5,12 @@ set -euo pipefail
 # Kifas E2E Gate — trigger a Kifas run and block until terminal status.
 # Exit 0 = gate pass (conclusion: success), Exit 1 = gate fail.
 #
+# Posts the run link + status to GitHub twice: once when the run starts and
+# once when it finishes (a sticky PR comment + the Actions step summary). The
+# failing case includes a short report. PR comments require KIFAS_GITHUB_TOKEN
+# and `permissions: pull-requests: write`; without a token the gate still works,
+# it just skips the comment.
+#
 # Required env:
 #   KIFAS_API_KEY      — Bearer token
 #   KIFAS_API_BASE     — base URL (default: https://api.kifas.io)
@@ -13,6 +19,7 @@ set -euo pipefail
 #   KIFAS_TARGET_URL   — preview URL to test
 #   KIFAS_APP_ARTIFACT — artifact name/path
 #   KIFAS_ENVIRONMENT  — environment label
+#   KIFAS_GITHUB_TOKEN — token to post the PR comment (default: none → skip)
 #
 # Tunable env (with sane defaults):
 #   KIFAS_POLL_INTERVAL_S  — seconds between polls (default: 5)
@@ -25,9 +32,14 @@ set -euo pipefail
 : "${KIFAS_TARGET_URL:=}"
 : "${KIFAS_APP_ARTIFACT:=}"
 : "${KIFAS_ENVIRONMENT:=}"
+: "${KIFAS_GITHUB_TOKEN:=}"
 : "${KIFAS_POLL_INTERVAL_S:=5}"
 : "${KIFAS_TIMEOUT_S:=1200}"
 : "${KIFAS_CURL:=curl}"
+
+GH_API="${GITHUB_API_URL:-https://api.github.com}"
+COMMENT_MARKER="<!-- kifas-e2e-run -->"
+KIFAS_RUN_URL=""
 
 # ---------------------------------------------------------------------------
 # Dependency check
@@ -52,6 +64,61 @@ if [[ "${GITHUB_REF:-}" =~ ^refs/pull/([0-9]+)/ ]]; then
 elif [[ -f "${GITHUB_EVENT_PATH:-}" ]]; then
   PR_NUMBER="$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)"
 fi
+
+# ---------------------------------------------------------------------------
+# GitHub reporting helpers (all best-effort; never fail the gate)
+# ---------------------------------------------------------------------------
+gh_comment_enabled() {
+  [[ -n "${KIFAS_GITHUB_TOKEN}" && -n "${PR_NUMBER}" && -n "${REPO}" ]]
+}
+
+run_link() {
+  if [[ -n "${KIFAS_RUN_URL}" ]]; then
+    printf '[View run in Kifas](%s)' "${KIFAS_RUN_URL}"
+  else
+    printf 'Run ID: `%s`' "${KIFAS_RUN_ID:-unknown}"
+  fi
+}
+
+# Create or update the single sticky PR comment (identified by COMMENT_MARKER).
+upsert_pr_comment() {
+  gh_comment_enabled || return 0
+  local body="$1" payload existing_id
+  payload="$(jq -n --arg b "${body}" '{body:$b}')"
+  existing_id="$(
+    "${KIFAS_CURL}" --silent --max-time 15 \
+      -H "Authorization: Bearer ${KIFAS_GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      "${GH_API}/repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" 2>/dev/null \
+      | jq -r --arg m "${COMMENT_MARKER}" 'map(select((.body // "") | contains($m))) | (.[0].id // empty)' 2>/dev/null || true
+  )"
+  if [[ -n "${existing_id}" ]]; then
+    "${KIFAS_CURL}" --silent --max-time 15 -X PATCH \
+      -H "Authorization: Bearer ${KIFAS_GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      -d "${payload}" \
+      "${GH_API}/repos/${REPO}/issues/comments/${existing_id}" >/dev/null 2>&1 || true
+  else
+    "${KIFAS_CURL}" --silent --max-time 15 -X POST \
+      -H "Authorization: Bearer ${KIFAS_GITHUB_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      -d "${payload}" \
+      "${GH_API}/repos/${REPO}/issues/${PR_NUMBER}/comments" >/dev/null 2>&1 || true
+  fi
+}
+
+write_step_summary() {
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '%s\n\n' "$1" >> "${GITHUB_STEP_SUMMARY}" || true
+  fi
+}
+
+# notify <markdown> — posts to the sticky PR comment (with marker) + step summary.
+notify() {
+  local md="$1"
+  upsert_pr_comment "$(printf '%s\n%s' "${COMMENT_MARKER}" "${md}")"
+  write_step_summary "${md}"
+}
 
 echo "::group::Kifas — trigger run"
 echo "repo:        ${REPO}"
@@ -115,6 +182,7 @@ echo "::endgroup::"
 
 KIFAS_RUN_ID="$(echo "${TRIGGER_RESPONSE}" | jq -r '.run_id // empty')"
 POLL_URL_RAW="$(echo "${TRIGGER_RESPONSE}" | jq -r '.poll_url // empty')"
+KIFAS_RUN_URL="$(echo "${TRIGGER_RESPONSE}" | jq -r '.run_url // empty')"
 
 if [[ -z "${KIFAS_RUN_ID}" ]]; then
   echo "::error::Trigger response missing run_id. Response: ${TRIGGER_RESPONSE}" >&2
@@ -135,6 +203,9 @@ fi
 echo "Kifas run started: ${KIFAS_RUN_ID}"
 echo "Polling: ${POLL_URL}"
 
+# Report #1: run started.
+notify "$(printf '### 🔄 Kifas E2E — run started\n\n**Status:** running\n\n%s\n\n<sub>commit `%s`</sub>' "$(run_link)" "${COMMIT_SHA:0:7}")"
+
 # ---------------------------------------------------------------------------
 # Poll until terminal status or timeout
 # ---------------------------------------------------------------------------
@@ -146,6 +217,7 @@ while true; do
   ELAPSED=$(( NOW_TS - START_TS ))
 
   if (( ELAPSED >= KIFAS_TIMEOUT_S )); then
+    notify "$(printf '### ⏱️ Kifas E2E — timed out\n\n**Result:** timed out after %ss\n\n%s' "${KIFAS_TIMEOUT_S}" "$(run_link)")"
     echo "::error::Kifas run timed out after ${KIFAS_TIMEOUT_S}s (run_id=${KIFAS_RUN_ID})" >&2
     exit 1
   fi
@@ -175,12 +247,23 @@ while true; do
 
   case "${STATUS}" in
     completed|failed|aborted)
+      # Prefer the run_url from the poll (authoritative); fall back to trigger's.
+      RUN_URL_POLL="$(echo "${POLL_RESPONSE}" | jq -r '.run_url // empty')"
+      if [[ -n "${RUN_URL_POLL}" ]]; then KIFAS_RUN_URL="${RUN_URL_POLL}"; fi
+      REPORT="$(echo "${POLL_RESPONSE}" | jq -r '.report // empty')"
+
       echo ""
       echo "Kifas run finished — status=${STATUS} conclusion=${CONCLUSION}"
       if [[ "${CONCLUSION}" == "success" ]]; then
+        notify "$(printf '### ✅ Kifas E2E — passed\n\n**Result:** success\n\n%s' "$(run_link)")"
         echo "Gate PASSED."
         exit 0
       else
+        REPORT_BLOCK=""
+        if [[ -n "${REPORT}" ]]; then
+          REPORT_BLOCK="$(printf '\n\n<details><summary>Report</summary>\n\n```\n%s\n```\n\n</details>' "${REPORT}")"
+        fi
+        notify "$(printf '### ❌ Kifas E2E — %s\n\n**Result:** %s\n\n%s%s' "${STATUS}" "${CONCLUSION}" "$(run_link)" "${REPORT_BLOCK}")"
         echo "::error::Kifas gate FAILED — run_id=${KIFAS_RUN_ID} conclusion=${CONCLUSION}" >&2
         exit 1
       fi
