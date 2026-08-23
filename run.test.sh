@@ -338,14 +338,28 @@ env \
   GITHUB_RUN_ID="99" \
   GITHUB_REF="refs/heads/main" \
   bash "${RUN_SH}" > "${OUT11}" 2>&1 || actual_exit=$?
-# Match the labelled line, not the raw `Trigger response:` JSON echo — that
-# echo contains run_url too and would pass this test for the wrong reason.
-if [[ "${actual_exit}" -eq 0 ]] \
-  && grep -q '^View run: https://app.kifas.io/acme/web/runs/run-011$' "${OUT11}"; then
+# The link must be its own top-level line and an ::notice:: annotation. The
+# raw trigger JSON must NOT be echoed: it contains run_url, so echoing it
+# both leaks "how to build the URL" instead of the URL and would let a naive
+# assertion here pass for the wrong reason.
+ok11=1
+grep -q '^Kifas run: https://app.kifas.io/acme/web/runs/run-011$' "${OUT11}" || ok11=0
+grep -q '^::notice title=Kifas E2E run::https://app.kifas.io/acme/web/runs/run-011$' "${OUT11}" || ok11=0
+! grep -q '^Trigger response:' "${OUT11}" || ok11=0
+# "Outside the collapsed group" is a matter of line ORDER, not presence — the
+# group's contents are in the log either way. Assert the status endpoint sits
+# before ::endgroup:: and the run link after it.
+endgroup_ln="$(grep -n '^::endgroup::' "${OUT11}" | tail -1 | cut -d: -f1)"
+status_ln="$(grep -n '^status_api:' "${OUT11}" | tail -1 | cut -d: -f1)"
+link_ln="$(grep -n '^Kifas run: ' "${OUT11}" | head -1 | cut -d: -f1)"
+[[ -n "${endgroup_ln}" && -n "${status_ln}" && -n "${link_ln}" ]] || ok11=0
+[[ -n "${status_ln}" && -n "${endgroup_ln}" && "${status_ln}" -lt "${endgroup_ln}" ]] || ok11=0
+[[ -n "${link_ln}" && -n "${endgroup_ln}" && "${link_ln}" -gt "${endgroup_ln}" ]] || ok11=0
+if [[ "${actual_exit}" -eq 0 && "${ok11}" -eq 1 ]]; then
   echo "  PASS  logs_dashboard_run_url"
   (( PASS++ )) || true
 else
-  echo "  FAIL  logs_dashboard_run_url  (exit=${actual_exit}; run_url missing from log)"
+  echo "  FAIL  logs_dashboard_run_url  (exit=${actual_exit}; link not in the forefront slot)"
   (( FAIL++ )) || true
 fi
 

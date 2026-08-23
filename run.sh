@@ -221,9 +221,6 @@ TRIGGER_RESPONSE="$(
   exit 1
 }
 
-echo "Trigger response: ${TRIGGER_RESPONSE}"
-echo "::endgroup::"
-
 KIFAS_RUN_ID="$(echo "${TRIGGER_RESPONSE}" | jq -r '.run_id // empty')"
 POLL_URL_RAW="$(echo "${TRIGGER_RESPONSE}" | jq -r '.poll_url // empty')"
 KIFAS_RUN_URL="$(echo "${TRIGGER_RESPONSE}" | jq -r '.run_url // empty')"
@@ -244,11 +241,24 @@ else
   POLL_URL="${KIFAS_API_BASE%/}/${POLL_URL_RAW#/}"
 fi
 
-echo "Kifas run started: ${KIFAS_RUN_ID}"
+# The machine status endpoint and the raw trigger JSON are debugging detail —
+# they stay inside the collapsed group. Only the human-facing run link is
+# promoted below it.
+echo "kifas_run_id: ${KIFAS_RUN_ID}"
+echo "status_api:   ${POLL_URL}"
+echo "::endgroup::"
+
+# The one line a human wants from this job: a clickable link to the run in
+# Kifas, at top level (never inside a ::group::, which renders collapsed).
+# ::notice:: additionally surfaces it in the run's Annotations panel, above
+# the log. Falls back to the status API only if the dashboard link can't be
+# resolved, so this slot is never empty.
 if [[ -n "${KIFAS_RUN_URL}" ]]; then
-  echo "View run: ${KIFAS_RUN_URL}"
+  echo "Kifas run: ${KIFAS_RUN_URL}"
+  echo "::notice title=Kifas E2E run::${KIFAS_RUN_URL}"
+else
+  echo "Kifas run: ${KIFAS_RUN_ID} (dashboard link unavailable; status API: ${POLL_URL})"
 fi
-echo "Polling (machine status API): ${POLL_URL}"
 
 # Report #1: run started.
 notify "$(printf '### 🔄 Kifas E2E — run started\n\n**Status:** running\n\n%s\n\n<sub>commit `%s`</sub>' "$(run_link)" "${COMMIT_SHA:0:7}")"
