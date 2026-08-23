@@ -13,7 +13,11 @@ inputs:
     required: false
     default: ''
   app-artifact:
-    description: Name or path of the app artifact to test (mobile builds, etc.).
+    description: >-
+      Local file path to a built app artifact (e.g. an APK) to gate this PR
+      on. Uploaded to Kifas over HTTPS before the run is triggered — a GitHub
+      Actions artifact has no publicly fetchable URL, so the action sends the
+      file itself rather than a link.
     required: false
     default: ''
   environment:

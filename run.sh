@@ -17,14 +17,18 @@ set -euo pipefail
 #
 # Optional env:
 #   KIFAS_TARGET_URL   — preview URL to test
-#   KIFAS_APP_ARTIFACT — artifact name/path
+#   KIFAS_APP_ARTIFACT — local path to a built app artifact (e.g. an APK) to
+#                        upload and gate this PR on. Uploaded to Kifas before
+#                        the trigger — a GitHub Actions artifact has no
+#                        publicly fetchable URL, so the file itself is sent.
 #   KIFAS_ENVIRONMENT  — environment label
 #   KIFAS_GITHUB_TOKEN — token to post the PR comment (default: none → skip)
 #
 # Tunable env (with sane defaults):
-#   KIFAS_POLL_INTERVAL_S  — seconds between polls (default: 5)
-#   KIFAS_TIMEOUT_S        — max seconds to wait (default: 1200 = 20 min)
-#   KIFAS_CURL             — curl binary override for testing (default: curl)
+#   KIFAS_POLL_INTERVAL_S   — seconds between polls (default: 5)
+#   KIFAS_TIMEOUT_S         — max seconds to wait (default: 1200 = 20 min)
+#   KIFAS_UPLOAD_TIMEOUT_S  — max seconds for the artifact upload (default: 300)
+#   KIFAS_CURL              — curl binary override for testing (default: curl)
 # ---------------------------------------------------------------------------
 
 : "${KIFAS_API_KEY:?KIFAS_API_KEY is required}"
@@ -35,6 +39,7 @@ set -euo pipefail
 : "${KIFAS_GITHUB_TOKEN:=}"
 : "${KIFAS_POLL_INTERVAL_S:=5}"
 : "${KIFAS_TIMEOUT_S:=1200}"
+: "${KIFAS_UPLOAD_TIMEOUT_S:=300}"
 : "${KIFAS_CURL:=curl}"
 
 GH_API="${GITHUB_API_URL:-https://api.github.com}"
@@ -120,6 +125,44 @@ notify() {
   write_step_summary "${md}"
 }
 
+# ---------------------------------------------------------------------------
+# Upload the app artifact, if any. A GitHub Actions artifact has no publicly
+# fetchable URL, so the file is uploaded directly and the trigger below gets
+# the resulting Kifas app_build id instead of the local path.
+# ---------------------------------------------------------------------------
+APP_BUILD_ID=""
+if [[ -n "${KIFAS_APP_ARTIFACT}" ]]; then
+  if [[ ! -f "${KIFAS_APP_ARTIFACT}" ]]; then
+    echo "::error::app-artifact not found: ${KIFAS_APP_ARTIFACT}" >&2
+    exit 1
+  fi
+
+  echo "::group::Kifas — upload app artifact"
+  UPLOAD_RESPONSE="$(
+    "${KIFAS_CURL}" \
+      --silent \
+      --show-error \
+      --fail-with-body \
+      --max-time "${KIFAS_UPLOAD_TIMEOUT_S}" \
+      -X POST \
+      -H "Authorization: Bearer ${KIFAS_API_KEY}" \
+      -F "file=@${KIFAS_APP_ARTIFACT}" \
+      "${KIFAS_API_BASE}/v1/app-builds/upload" \
+    2>&1
+  )" || {
+    echo "::error::app-artifact upload failed:" >&2
+    echo "${UPLOAD_RESPONSE}" >&2
+    exit 1
+  }
+  APP_BUILD_ID="$(echo "${UPLOAD_RESPONSE}" | jq -r '.app_build_id // empty')"
+  if [[ -z "${APP_BUILD_ID}" ]]; then
+    echo "::error::app-artifact upload response missing app_build_id. Response: ${UPLOAD_RESPONSE}" >&2
+    exit 1
+  fi
+  echo "Uploaded app artifact -> app_build_id: ${APP_BUILD_ID}"
+  echo "::endgroup::"
+fi
+
 echo "::group::Kifas — trigger run"
 echo "repo:        ${REPO}"
 echo "commit_sha:  ${COMMIT_SHA}"
@@ -127,6 +170,7 @@ echo "branch:      ${BRANCH}"
 echo "pr_number:   ${PR_NUMBER:-<none>}"
 echo "run_id:      ${RUN_ID}"
 echo "target_url:  ${KIFAS_TARGET_URL:-<none>}"
+echo "app_build:   ${APP_BUILD_ID:-<none>}"
 echo "environment: ${KIFAS_ENVIRONMENT:-<none>}"
 echo "api_base:    ${KIFAS_API_BASE}"
 
@@ -135,7 +179,7 @@ echo "api_base:    ${KIFAS_API_BASE}"
 # ---------------------------------------------------------------------------
 PAYLOAD="$(jq -n \
   --arg target_url    "${KIFAS_TARGET_URL}" \
-  --arg app_artifact  "${KIFAS_APP_ARTIFACT}" \
+  --arg app_artifact  "${APP_BUILD_ID}" \
   --arg environment   "${KIFAS_ENVIRONMENT}" \
   --arg repo          "${REPO}" \
   --arg commit_sha    "${COMMIT_SHA}" \
@@ -201,7 +245,10 @@ else
 fi
 
 echo "Kifas run started: ${KIFAS_RUN_ID}"
-echo "Polling: ${POLL_URL}"
+if [[ -n "${KIFAS_RUN_URL}" ]]; then
+  echo "View run: ${KIFAS_RUN_URL}"
+fi
+echo "Polling (machine status API): ${POLL_URL}"
 
 # Report #1: run started.
 notify "$(printf '### 🔄 Kifas E2E — run started\n\n**Status:** running\n\n%s\n\n<sub>commit `%s`</sub>' "$(run_link)" "${COMMIT_SHA:0:7}")"
