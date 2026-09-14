@@ -24,6 +24,18 @@ inputs:
     description: Logical environment label forwarded to the run (e.g. staging, preview).
     required: false
     default: ''
+  suite:
+    description: >-
+      Suite to run: its slug (`smoke`), `project/slug` (`web/smoke`), or its id.
+      Defaults to the project's "All workflows" suite — every test you have.
+    required: false
+    default: ''
+  params:
+    description: >-
+      Suite parameters, one `key=value` per line. `base_url` and `app_build_id`
+      are filled from target-url / app-artifact; anything here wins over those.
+    required: false
+    default: ''
   api-base:
     description: Kifas API base URL.
     required: false
@@ -47,5 +59,7 @@ runs:
         KIFAS_TARGET_URL: ${{ inputs.target-url }}
         KIFAS_APP_ARTIFACT: ${{ inputs.app-artifact }}
         KIFAS_ENVIRONMENT: ${{ inputs.environment }}
+        KIFAS_SUITE: ${{ inputs.suite }}
+        KIFAS_PARAMS: ${{ inputs.params }}
         KIFAS_API_BASE: ${{ inputs.api-base }}
         KIFAS_GITHUB_TOKEN: ${{ inputs.github-token }}

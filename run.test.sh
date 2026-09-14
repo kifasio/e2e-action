@@ -27,8 +27,12 @@ make_mock_curl() {
 # When MOCK_CURL_CALLS_LOG is set, appends the full arg list of each
 # invocation as one line, so tests can assert call order/content.
 set -euo pipefail
+BODY=""
+if [[ " $* " == *" --data @- "* ]]; then
+  BODY="$(cat)"
+fi
 if [[ -n "${MOCK_CURL_CALLS_LOG:-}" ]]; then
-  printf '%s\n' "$*" >> "${MOCK_CURL_CALLS_LOG}"
+  printf '%s %s\n' "$*" "${BODY}" >> "${MOCK_CURL_CALLS_LOG}"
 fi
 RESP_FILE="${MOCK_CURL_RESPONSES_FILE:?}"
 if [[ ! -f "${RESP_FILE}" ]]; then
@@ -360,6 +364,155 @@ if [[ "${actual_exit}" -eq 0 && "${ok11}" -eq 1 ]]; then
   (( PASS++ )) || true
 else
   echo "  FAIL  logs_dashboard_run_url  (exit=${actual_exit}; link not in the forefront slot)"
+  (( FAIL++ )) || true
+fi
+
+# Case 12: a suite terminal status of "passed" gates green, and the report lines
+# reach the step summary.
+RESP12="${TMP_DIR}/responses_suite.txt"
+cat > "${RESP12}" << 'EOF'
+{"run_id":"srun-012","poll_url":"/v1/github/runs/srun-012/status","run_url":"https://app.kifas.io/acme/web/suites/default/runs/srun-012"}
+{"status":"running","conclusion":null}
+{"status":"passed","conclusion":"success","run_url":"https://app.kifas.io/acme/web/suites/default/runs/srun-012","report":"✅ Checkout\n✅ Login","counts":{"total":2,"passed":2,"failed":0,"aborted":0,"skipped":0}}
+EOF
+SUMMARY12="${TMP_DIR}/summary12.md"
+: > "${SUMMARY12}"
+mock_curl12="${TMP_DIR}/curl_suite"
+make_mock_curl "${mock_curl12}"
+actual_exit=0
+env \
+  KIFAS_API_KEY="test-key-123" \
+  KIFAS_API_BASE="https://mock.kifas.io" \
+  KIFAS_POLL_INTERVAL_S="0" \
+  KIFAS_TIMEOUT_S="60" \
+  KIFAS_CURL="${mock_curl12}" \
+  MOCK_CURL_RESPONSES_FILE="${RESP12}" \
+  GITHUB_STEP_SUMMARY="${SUMMARY12}" \
+  GITHUB_REPOSITORY="acme/web" \
+  GITHUB_SHA="abc123def456" \
+  GITHUB_REF_NAME="main" \
+  GITHUB_RUN_ID="99" \
+  GITHUB_REF="refs/heads/main" \
+  bash "${RUN_SH}" >/dev/null 2>&1 || actual_exit=$?
+if [[ "${actual_exit}" -eq 0 ]] && grep -q -- "- ✅ Checkout" "${SUMMARY12}" && grep -q -- "- ✅ Login" "${SUMMARY12}" && grep -q "2 passed, 0 failed of 2" "${SUMMARY12}"; then
+  echo "  PASS  suite_passed_lists_report_lines"
+  (( PASS++ )) || true
+else
+  echo "  FAIL  suite_passed_lists_report_lines  (exit=${actual_exit})"
+  (( FAIL++ )) || true
+fi
+
+# Case 13: a failed suite lists the failing workflow's reason and gates red.
+RESP13="${TMP_DIR}/responses_suite_fail.txt"
+cat > "${RESP13}" << 'EOF'
+{"run_id":"srun-013","poll_url":"/v1/github/runs/srun-013/status"}
+{"status":"failed","conclusion":"failure","report":"✅ Login\n❌ Checkout — button not found","counts":{"total":2,"passed":1,"failed":1,"aborted":0,"skipped":0}}
+EOF
+SUMMARY13="${TMP_DIR}/summary13.md"
+: > "${SUMMARY13}"
+mock_curl13="${TMP_DIR}/curl_suite_fail"
+make_mock_curl "${mock_curl13}"
+actual_exit=0
+env \
+  KIFAS_API_KEY="test-key-123" \
+  KIFAS_API_BASE="https://mock.kifas.io" \
+  KIFAS_POLL_INTERVAL_S="0" \
+  KIFAS_TIMEOUT_S="60" \
+  KIFAS_CURL="${mock_curl13}" \
+  MOCK_CURL_RESPONSES_FILE="${RESP13}" \
+  GITHUB_STEP_SUMMARY="${SUMMARY13}" \
+  GITHUB_REPOSITORY="acme/web" \
+  GITHUB_SHA="abc123def456" \
+  GITHUB_REF_NAME="main" \
+  GITHUB_RUN_ID="99" \
+  GITHUB_REF="refs/heads/main" \
+  bash "${RUN_SH}" >/dev/null 2>&1 || actual_exit=$?
+if [[ "${actual_exit}" -eq 1 ]] && grep -q -- "- ❌ Checkout — button not found" "${SUMMARY13}"; then
+  echo "  PASS  suite_failed_lists_failure_reason"
+  (( PASS++ )) || true
+else
+  echo "  FAIL  suite_failed_lists_failure_reason  (exit=${actual_exit})"
+  (( FAIL++ )) || true
+fi
+
+# Case 14: the suite input and multiline params reach the trigger payload as
+# `suite` + a `params` JSON object (values keep their own '=' characters).
+RESP14="${TMP_DIR}/responses_params.txt"
+cat > "${RESP14}" << 'EOF'
+{"run_id":"srun-014","poll_url":"/v1/github/runs/srun-014/status"}
+{"status":"passed","conclusion":"success"}
+EOF
+CALLS14="${TMP_DIR}/calls14.log"
+: > "${CALLS14}"
+mock_curl14="${TMP_DIR}/curl_params"
+make_mock_curl "${mock_curl14}"
+actual_exit=0
+env \
+  KIFAS_API_KEY="test-key-123" \
+  KIFAS_API_BASE="https://mock.kifas.io" \
+  KIFAS_POLL_INTERVAL_S="0" \
+  KIFAS_TIMEOUT_S="60" \
+  KIFAS_CURL="${mock_curl14}" \
+  MOCK_CURL_RESPONSES_FILE="${RESP14}" \
+  MOCK_CURL_CALLS_LOG="${CALLS14}" \
+  KIFAS_SUITE="web/smoke" \
+  KIFAS_PARAMS="$(printf 'locale=en-GB\n\n# a comment\ncoupon = A=B\n')" \
+  GITHUB_REPOSITORY="acme/web" \
+  GITHUB_SHA="abc123def456" \
+  GITHUB_REF_NAME="main" \
+  GITHUB_RUN_ID="99" \
+  GITHUB_REF="refs/heads/main" \
+  bash "${RUN_SH}" >/dev/null 2>&1 || actual_exit=$?
+TRIGGER_CALL="$(tr -d '[:space:]' < "${CALLS14}")"
+ok14=1
+[[ "${actual_exit}" -eq 0 ]] || ok14=0
+grep -q '"suite":"web/smoke"' <<< "${TRIGGER_CALL}" || ok14=0
+grep -q '"locale":"en-GB"' <<< "${TRIGGER_CALL}" || ok14=0
+grep -q '"coupon":"A=B"' <<< "${TRIGGER_CALL}" || ok14=0
+! grep -q 'acomment' <<< "${TRIGGER_CALL}" || ok14=0
+if [[ "${ok14}" -eq 1 ]]; then
+  echo "  PASS  sends_suite_and_parsed_params"
+  (( PASS++ )) || true
+else
+  echo "  FAIL  sends_suite_and_parsed_params  (exit=${actual_exit}) ${TRIGGER_CALL}"
+  (( FAIL++ )) || true
+fi
+
+# Case 15: no params input → an empty params object, never a malformed payload.
+RESP15="${TMP_DIR}/responses_noparams.txt"
+cat > "${RESP15}" << 'EOF'
+{"run_id":"srun-015","poll_url":"/v1/github/runs/srun-015/status"}
+{"status":"passed","conclusion":"success"}
+EOF
+CALLS15="${TMP_DIR}/calls15.log"
+: > "${CALLS15}"
+mock_curl15="${TMP_DIR}/curl_noparams"
+make_mock_curl "${mock_curl15}"
+actual_exit=0
+env \
+  KIFAS_API_KEY="test-key-123" \
+  KIFAS_API_BASE="https://mock.kifas.io" \
+  KIFAS_POLL_INTERVAL_S="0" \
+  KIFAS_TIMEOUT_S="60" \
+  KIFAS_CURL="${mock_curl15}" \
+  MOCK_CURL_RESPONSES_FILE="${RESP15}" \
+  MOCK_CURL_CALLS_LOG="${CALLS15}" \
+  GITHUB_REPOSITORY="acme/web" \
+  GITHUB_SHA="abc123def456" \
+  GITHUB_REF_NAME="main" \
+  GITHUB_RUN_ID="99" \
+  GITHUB_REF="refs/heads/main" \
+  bash "${RUN_SH}" >/dev/null 2>&1 || actual_exit=$?
+TRIGGER_CALL15="$(tr -d '[:space:]' < "${CALLS15}")"
+ok15=1
+[[ "${actual_exit}" -eq 0 ]] || ok15=0
+grep -q '"params":{}' <<< "${TRIGGER_CALL15}" || ok15=0
+! grep -q '"suite"' <<< "${TRIGGER_CALL15}" || ok15=0
+if [[ "${ok15}" -eq 1 ]]; then
+  echo "  PASS  empty_params_and_no_suite_key"
+  (( PASS++ )) || true
+else
+  echo "  FAIL  empty_params_and_no_suite_key  (exit=${actual_exit}) ${TRIGGER_CALL15}"
   (( FAIL++ )) || true
 fi
 

@@ -34,6 +34,10 @@ jobs:
           api-key: ${{ secrets.KIFAS_API_KEY }}
           target-url: ${{ steps.deploy.outputs.url }}
           environment: preview
+          suite: smoke
+          params: |
+            locale=en-GB
+            coupon_code=WELCOME10
 ```
 
 ## Inputs
@@ -44,14 +48,17 @@ jobs:
 | `target-url` | No | `''` | URL of the deployed preview to test. |
 | `app-artifact` | No | `''` | Name or path of an app artifact (mobile builds, etc.). |
 | `environment` | No | `''` | Logical environment label forwarded to the run (e.g. `staging`, `preview`). |
+| `suite` | No | `''` | Suite to run: its slug (`smoke`), `project/slug` (`web/smoke`), or its id. Defaults to the project's **All workflows** suite — every test you have. |
+| `params` | No | `''` | Suite parameters, one `key=value` per line. `base_url` comes from `target-url` and `app_build_id` from `app-artifact`; anything set here wins. |
 | `api-base` | No | `https://api.kifas.io` | Kifas API base URL. Override for self-hosted or staging. |
 
 ## Behaviour
 
 1. Reads `GITHUB_SHA`, `GITHUB_REPOSITORY`, `GITHUB_REF_NAME`, `GITHUB_RUN_ID`, and the PR number (from `GITHUB_REF` or the event payload) automatically from the runner environment.
-2. POSTs to `{api-base}/v1/github/runs` with the run context and your inputs.
-3. Polls the returned `poll_url` every 5 s until the run reaches a terminal status (`completed` | `failed` | `aborted`), timing out after 20 minutes.
+2. POSTs to `{api-base}/v1/github/runs` with the run context and your inputs. Kifas runs the whole suite — every test in it, in the suite's own concurrency policy.
+3. Polls the returned `poll_url` every 5 s until the suite reaches a terminal status (`passed` | `failed` | `aborted`), timing out after 20 minutes.
 4. Exits 0 if `conclusion === 'success'`; exits 1 otherwise with an annotated error message.
+5. The PR comment and the step summary list one line per test in the suite (`✅ name` / `❌ name — why`), plus the pass/fail counts.
 
 ## Exit codes
 
@@ -70,4 +77,4 @@ jobs:
 bash actions/e2e-action/run.test.sh
 ```
 
-The test suite is fully hermetic — it replaces `curl` with an in-process mock script via the `KIFAS_CURL` env var and exercises six scenarios (success flow, failure flow, aborted, absolute poll URL, PR number extraction, and missing API key).
+The test suite is fully hermetic — it replaces `curl` with an in-process mock script via the `KIFAS_CURL` env var and exercises the trigger, poll and reporting paths (success, failure, aborted, absolute poll URL, PR number extraction, missing API key, artifact upload, the dashboard run link, the `suite` input, and `params` line parsing).

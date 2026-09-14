@@ -22,6 +22,9 @@ set -euo pipefail
 #                        the trigger — a GitHub Actions artifact has no
 #                        publicly fetchable URL, so the file itself is sent.
 #   KIFAS_ENVIRONMENT  — environment label
+#   KIFAS_SUITE        — suite to run (slug, project/slug, or id). Default: the
+#                        project's "All workflows" suite.
+#   KIFAS_PARAMS       — suite parameters, one key=value per line
 #   KIFAS_GITHUB_TOKEN — token to post the PR comment (default: none → skip)
 #
 # Tunable env (with sane defaults):
@@ -36,6 +39,8 @@ set -euo pipefail
 : "${KIFAS_TARGET_URL:=}"
 : "${KIFAS_APP_ARTIFACT:=}"
 : "${KIFAS_ENVIRONMENT:=}"
+: "${KIFAS_SUITE:=}"
+: "${KIFAS_PARAMS:=}"
 : "${KIFAS_GITHUB_TOKEN:=}"
 : "${KIFAS_POLL_INTERVAL_S:=5}"
 : "${KIFAS_TIMEOUT_S:=1200}"
@@ -170,6 +175,7 @@ echo "branch:      ${BRANCH}"
 echo "pr_number:   ${PR_NUMBER:-<none>}"
 echo "run_id:      ${RUN_ID}"
 echo "target_url:  ${KIFAS_TARGET_URL:-<none>}"
+echo "suite:       ${KIFAS_SUITE:-<default suite>}"
 echo "app_build:   ${APP_BUILD_ID:-<none>}"
 echo "environment: ${KIFAS_ENVIRONMENT:-<none>}"
 echo "api_base:    ${KIFAS_API_BASE}"
@@ -177,10 +183,22 @@ echo "api_base:    ${KIFAS_API_BASE}"
 # ---------------------------------------------------------------------------
 # Build trigger payload
 # ---------------------------------------------------------------------------
+# Suite params arrive as `key=value` lines; blank lines, comments and anything
+# that isn't `name=value` are ignored. The value keeps its own `=` characters.
+PARAMS_JSON="$(printf '%s' "${KIFAS_PARAMS}" | jq -R -s '
+  split("\n")
+  | map(capture("^\\s*(?<k>[A-Za-z_][A-Za-z0-9_]*)\\s*=(?<v>.*)$")?)
+  | map({ (.k): (.v | sub("^\\s+"; "") | sub("\\s+$"; "")) })
+  | add // {}
+')"
+echo "params:      $(echo "${PARAMS_JSON}" | jq -r 'keys | join(",")')"
+
 PAYLOAD="$(jq -n \
   --arg target_url    "${KIFAS_TARGET_URL}" \
   --arg app_artifact  "${APP_BUILD_ID}" \
   --arg environment   "${KIFAS_ENVIRONMENT}" \
+  --arg suite         "${KIFAS_SUITE}" \
+  --argjson params    "${PARAMS_JSON}" \
   --arg repo          "${REPO}" \
   --arg commit_sha    "${COMMIT_SHA}" \
   --arg branch        "${BRANCH}" \
@@ -190,6 +208,7 @@ PAYLOAD="$(jq -n \
     target_url:   (if $target_url   != "" then $target_url   else null end),
     app_artifact: (if $app_artifact != "" then $app_artifact else null end),
     environment:  (if $environment  != "" then $environment  else null end),
+    params:       $params,
     context: {
       repo:       $repo,
       commit_sha: $commit_sha,
@@ -197,7 +216,8 @@ PAYLOAD="$(jq -n \
       pr_number:  (if $pr_number != "" then ($pr_number | tonumber) else null end),
       run_id:     (if $run_id    != "" then ($run_id    | tonumber) else null end)
     }
-  }'
+  }
+  + (if $suite != "" then { suite: $suite } else {} end)'
 )"
 
 # ---------------------------------------------------------------------------
@@ -212,9 +232,11 @@ TRIGGER_RESPONSE="$(
     -X POST \
     -H "Authorization: Bearer ${KIFAS_API_KEY}" \
     -H "Content-Type: application/json" \
-    -d "${PAYLOAD}" \
+    --data @- \
     "${KIFAS_API_BASE}/v1/github/runs" \
-  2>&1
+  2>&1 <<PAYLOAD_EOF
+${PAYLOAD}
+PAYLOAD_EOF
 )" || {
   echo "::error::Kifas trigger request failed:" >&2
   echo "${TRIGGER_RESPONSE}" >&2
@@ -303,24 +325,38 @@ while true; do
   fi
 
   case "${STATUS}" in
-    completed|failed|aborted)
+    passed|completed|failed|aborted)
       # Prefer the run_url from the poll (authoritative); fall back to trigger's.
       RUN_URL_POLL="$(echo "${POLL_RESPONSE}" | jq -r '.run_url // empty')"
       if [[ -n "${RUN_URL_POLL}" ]]; then KIFAS_RUN_URL="${RUN_URL_POLL}"; fi
       REPORT="$(echo "${POLL_RESPONSE}" | jq -r '.report // empty')"
 
+      COUNTS="$(echo "${POLL_RESPONSE}" | jq -r '
+        if .counts then "\(.counts.passed) passed, \(.counts.failed) failed of \(.counts.total)" else empty end
+      ')"
+
       echo ""
       echo "Kifas run finished — status=${STATUS} conclusion=${CONCLUSION}"
+      if [[ -n "${REPORT}" ]]; then
+        echo "${REPORT}"
+      fi
+
+      # The report is one line per workflow in the suite ("✅ name" / "❌ name — why").
+      REPORT_BLOCK=""
+      if [[ -n "${REPORT}" ]]; then
+        REPORT_BLOCK="$(printf '\n\n%s' "$(echo "${REPORT}" | sed 's/^/- /')")"
+      fi
+      COUNTS_BLOCK=""
+      if [[ -n "${COUNTS}" ]]; then
+        COUNTS_BLOCK="$(printf '\n\n**Tests:** %s' "${COUNTS}")"
+      fi
+
       if [[ "${CONCLUSION}" == "success" ]]; then
-        notify "$(printf '### ✅ Kifas E2E — passed\n\n**Result:** success\n\n%s' "$(run_link)")"
+        notify "$(printf '### ✅ Kifas E2E — passed\n\n**Result:** success%s\n\n%s%s' "${COUNTS_BLOCK}" "$(run_link)" "${REPORT_BLOCK}")"
         echo "Gate PASSED."
         exit 0
       else
-        REPORT_BLOCK=""
-        if [[ -n "${REPORT}" ]]; then
-          REPORT_BLOCK="$(printf '\n\n<details><summary>Report</summary>\n\n```\n%s\n```\n\n</details>' "${REPORT}")"
-        fi
-        notify "$(printf '### ❌ Kifas E2E — %s\n\n**Result:** %s\n\n%s%s' "${STATUS}" "${CONCLUSION}" "$(run_link)" "${REPORT_BLOCK}")"
+        notify "$(printf '### ❌ Kifas E2E — %s\n\n**Result:** %s%s\n\n%s%s' "${STATUS}" "${CONCLUSION}" "${COUNTS_BLOCK}" "$(run_link)" "${REPORT_BLOCK}")"
         echo "::error::Kifas gate FAILED — run_id=${KIFAS_RUN_ID} conclusion=${CONCLUSION}" >&2
         exit 1
       fi
