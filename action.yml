@@ -8,16 +8,23 @@ inputs:
   api-key:
     description: Kifas API key (store as a secret).
     required: true
+  gate-id:
+    description: >-
+      The merge gate's id, for a gate set up in Kifas. Required with the key a
+      gate setup issued; the job must then grant `permissions: id-token: write`
+      so the action can prove to Kifas which GitHub run is calling. Leave empty
+      for an ordinary API key.
+    required: false
+    default: ''
   target-url:
     description: URL of the deployed preview to test (e.g. the PR deploy URL).
     required: false
     default: ''
   app-artifact:
     description: >-
-      Local file path to a built app artifact (e.g. an APK) to gate this PR
-      on. Uploaded to Kifas over HTTPS before the run is triggered — a GitHub
-      Actions artifact has no publicly fetchable URL, so the action sends the
-      file itself rather than a link.
+      The app build to gate this PR on: a local file path (e.g. an APK built
+      earlier in the job, uploaded to Kifas over HTTPS) or an http(s) URL Kifas
+      can download the build from.
     required: false
     default: ''
   environment:
@@ -48,14 +55,28 @@ inputs:
     required: false
     default: ${{ github.token }}
 
+outputs:
+  suite-result:
+    description: >-
+      The suite's terminal result — passed, failed or aborted — as Kifas
+      reported it when the run finished. Empty when no terminal result was
+      reached (a trigger failure, a timeout or a cancelled job); starting the
+      suite alone never sets it.
+    value: ${{ steps.kifas.outputs.suite-result }}
+  suite-run-id:
+    description: The id of the Kifas suite run this job started.
+    value: ${{ steps.kifas.outputs.suite-run-id }}
+
 runs:
   using: composite
   steps:
     - name: Run Kifas E2E gate
+      id: kifas
       shell: bash
       run: bash "${{ github.action_path }}/run.sh"
       env:
         KIFAS_API_KEY: ${{ inputs.api-key }}
+        KIFAS_GATE_ID: ${{ inputs.gate-id }}
         KIFAS_TARGET_URL: ${{ inputs.target-url }}
         KIFAS_APP_ARTIFACT: ${{ inputs.app-artifact }}
         KIFAS_ENVIRONMENT: ${{ inputs.environment }}
