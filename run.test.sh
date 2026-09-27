@@ -928,7 +928,7 @@ env \
 ok17=1
 [[ "${actual_exit}" -eq 1 ]] || ok17=0
 grep -q '^Reason: The test this run built needs a person to review' "${OUT17}" || ok17=0
-grep -q '::error::Kifas gate FAILED — run_id=00000000-0000-4000-8000-000000000029 conclusion=action_required — The test this run built needs a person' "${OUT17}" || ok17=0
+grep -q '::error::Kifas check FAILED — run_id=00000000-0000-4000-8000-000000000029 conclusion=action_required — The test this run built needs a person' "${OUT17}" || ok17=0
 grep -q '\*\*Why:\*\* The test this run built needs a person to review' "${SUMMARY17}" || ok17=0
 if [[ "${ok17}" -eq 1 ]]; then
   echo "  PASS  action_required_prints_reason"
@@ -961,7 +961,7 @@ env \
   GITHUB_RUN_ID="99" \
   GITHUB_REF="refs/heads/main" \
   bash "${RUN_SH}" >"${OUT18}" 2>&1 || actual_exit=$?
-if [[ "${actual_exit}" -eq 1 ]] && grep -qx '::error::Kifas gate FAILED — run_id=00000000-0000-4000-8000-000000000030 conclusion=failure' "${OUT18}" && ! grep -q '^Reason:' "${OUT18}"; then
+if [[ "${actual_exit}" -eq 1 ]] && grep -qx '::error::Kifas check FAILED — run_id=00000000-0000-4000-8000-000000000030 conclusion=failure' "${OUT18}" && ! grep -q '^Reason:' "${OUT18}"; then
   echo "  PASS  failure_without_reason_unchanged"
   (( PASS++ )) || true
 else

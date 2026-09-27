@@ -1,5 +1,5 @@
 name: Kifas E2E Gate
-description: Trigger a Kifas run and block until it completes. Exit code is the gate — 0 pass, 1 fail.
+description: Trigger a Kifas run and block until it completes. Exit code is the result — 0 pass, 1 fail.
 branding:
   icon: check-circle
   color: blue
@@ -10,8 +10,8 @@ inputs:
     required: true
   gate-id:
     description: >-
-      The merge gate's id, for a gate set up in Kifas. Required with the key a
-      gate setup issued; the job must then grant `permissions: id-token: write`
+      The setup ID of GitHub checks set up in Kifas. Required with the key that
+      setup issued; the job must then grant `permissions: id-token: write`
       so the action can prove to Kifas which GitHub run is calling. Leave empty
       for an ordinary API key.
     required: false
@@ -22,7 +22,7 @@ inputs:
     default: ''
   app-artifact:
     description: >-
-      The app build to gate this PR on: a local file path (e.g. an APK built
+      The app build to test this PR on: a local file path (e.g. an APK built
       earlier in the job, uploaded to Kifas over HTTPS) or an http(s) URL Kifas
       can download the build from.
     required: false
@@ -51,7 +51,7 @@ inputs:
     description: >-
       Token used to post the run link + result as a PR comment. Defaults to the
       workflow's GITHUB_TOKEN; the job needs `permissions: pull-requests: write`.
-      Leave empty to skip PR comments (the run still gates via exit code).
+      Leave empty to skip PR comments (the exit code still passes or fails the job).
     required: false
     default: ${{ github.token }}
 
@@ -70,7 +70,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Run Kifas E2E gate
+    - name: Run Kifas E2E checks
       id: kifas
       shell: bash
       run: bash "${{ github.action_path }}/run.sh"

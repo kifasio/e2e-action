@@ -16,7 +16,7 @@ set -euo pipefail
 #   KIFAS_API_BASE     — base URL (default: https://api.kifas.io)
 #
 # Optional env:
-#   KIFAS_GATE_ID      — the merge gate's id. Required with a key a gate setup
+#   KIFAS_GATE_ID      — the GitHub checks setup ID. Required with a key a gate setup
 #                        issued: every call to Kifas then carries a fresh GitHub
 #                        Actions OIDC token (audience kifas-github-gate), which
 #                        needs `permissions: id-token: write` on this job.
@@ -126,7 +126,7 @@ set_output() {
 GATE_OIDC=""
 fetch_identity() {
   if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
-    echo "::error::This Kifas merge gate needs a GitHub identity token. Add 'permissions: id-token: write' to the job that runs the Kifas action." >&2
+    echo "::error::These Kifas checks need a GitHub identity token. Add 'permissions: id-token: write' to the job that runs the Kifas action." >&2
     return 1
   fi
   local sep='?' response
@@ -245,7 +245,7 @@ notify() {
 # unset, so the required check that reads it fails instead of passing.
 on_cancel() {
   trap - INT TERM
-  echo "::error::Kifas gate cancelled before the suite reached a result${KIFAS_RUN_ID:+ (run_id=${KIFAS_RUN_ID})}." >&2
+  echo "::error::Kifas check cancelled before the suite reached a result${KIFAS_RUN_ID:+ (run_id=${KIFAS_RUN_ID})}." >&2
   write_step_summary "$(printf '### ⏹️ Kifas E2E — cancelled\n\n**Result:** no result — the job was cancelled')"
   exit 1
 }
@@ -598,11 +598,11 @@ while true; do
 
       if [[ "${CONCLUSION}" == "success" ]]; then
         notify "$(printf '### ✅ Kifas E2E — passed\n\n**Result:** success%s\n\n%s%s' "${COUNTS_BLOCK}" "$(run_link)" "${REPORT_BLOCK}")"
-        echo "Gate PASSED."
+        echo "Kifas check PASSED."
         exit 0
       else
         notify "$(printf '### ❌ Kifas E2E — %s\n\n**Result:** %s%s%s\n\n%s%s' "${STATUS}" "${CONCLUSION}" "${REASON_BLOCK}" "${COUNTS_BLOCK}" "$(run_link)" "${REPORT_BLOCK}")"
-        echo "::error::Kifas gate FAILED — run_id=${KIFAS_RUN_ID} conclusion=${CONCLUSION}${REASON:+ — ${REASON}}" >&2
+        echo "::error::Kifas check FAILED — run_id=${KIFAS_RUN_ID} conclusion=${CONCLUSION}${REASON:+ — ${REASON}}" >&2
         exit 1
       fi
       ;;
