@@ -1,0 +1,81 @@
+name: Kifas Remote WebDriver
+description: >-
+  Run your existing WebDriver/Appium test command against the Kifas remote
+  gateway — a drop-in replacement for BrowserStack App Automate. The
+  customer's test exit code is this action's exit code, always.
+branding:
+  icon: smartphone
+  color: blue
+
+inputs:
+  api-key:
+    description: >-
+      Kifas API key with the session:create and workflow:run scopes (store
+      as a secret). session:create opens/closes the suite build; workflow:run
+      is required separately by the app upload endpoint. Suites that run
+      @kifas/appium visual checks also need visual_snapshot:write, and
+      ai_check:run for AI checks.
+    required: true
+  project-id:
+    description: Kifas project uuid.
+    required: true
+  suite-name:
+    description: Suite name shown in Kifas for this build.
+    required: true
+  build-name:
+    description: Human build label, the same value you'd pass as BrowserStack's buildName.
+    required: true
+  build-id:
+    description: >-
+      A value unique to this CI build (e.g. the GitHub run id or a UUID),
+      used as an idempotency key if the build is opened more than once.
+    required: true
+  app-path:
+    description: Local path to the built .apk or .ipa to run against.
+    required: true
+  test-command:
+    description: >-
+      Shell command that runs your test suite. Its exit code is this
+      action's exit code.
+    required: true
+  build-version:
+    description: >-
+      Version label for the uploaded build. Defaults to the short commit SHA,
+      so each CI build is distinguishable in the Kifas build list.
+    required: false
+    default: ''
+  link-github-build:
+    description: >-
+      Also send repo, commit, branch and PR number so the build links to its
+      commit and pull request in Kifas. Requires the Kifas GitHub App on this
+      repository — without it the upload is refused with "repo not connected
+      to Kifas". Leave false if you have not installed it.
+    required: false
+    default: 'false'
+  api-base:
+    description: Kifas API base URL.
+    required: false
+    default: https://api.kifas.io
+  remote-url:
+    description: Kifas WebDriver hub URL. Override only for testing against a non-production gateway.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Run against Kifas remote WebDriver
+      shell: bash
+      run: bash "${{ github.action_path }}/run.sh"
+      env:
+        KIFAS_API_KEY: ${{ inputs.api-key }}
+        KIFAS_PROJECT_ID: ${{ inputs.project-id }}
+        KIFAS_SUITE_NAME: ${{ inputs.suite-name }}
+        KIFAS_BUILD_NAME: ${{ inputs.build-name }}
+        KIFAS_BUILD_ID: ${{ inputs.build-id }}
+        KIFAS_APP_PATH: ${{ inputs.app-path }}
+        KIFAS_TEST_COMMAND: ${{ inputs.test-command }}
+        KIFAS_BUILD_VERSION: ${{ inputs.build-version }}
+        KIFAS_LINK_GITHUB_BUILD: ${{ inputs.link-github-build }}
+        KIFAS_API_BASE: ${{ inputs.api-base }}
+        KIFAS_REMOTE_URL: ${{ inputs.remote-url }}
