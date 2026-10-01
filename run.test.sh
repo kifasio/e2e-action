@@ -983,6 +983,216 @@ else
   (( FAIL++ )) || true
 fi
 
+# ---------------------------------------------------------------------------
+# context.git — branch, pull request and commit, per GitHub event
+# ---------------------------------------------------------------------------
+# run_identity <name> <event_name> <event_json> [extra env...] — a plain-key run
+# for one event. Sets I_EXIT and I_BODY (every logged call, whitespace removed).
+run_identity() {
+  local name="$1" event_name="$2" event_json="$3"
+  shift 3
+  local event_file="${TMP_DIR}/${name}.event.json"
+  local responses="${TMP_DIR}/${name}.responses"
+  local calls="${TMP_DIR}/${name}.calls"
+  local mock="${TMP_DIR}/curl_${name}"
+  printf '%s\n' "${event_json}" > "${event_file}"
+  cat > "${responses}" << 'EOF_I'
+{"run_id":"00000000-0000-4000-8000-0000000000e1","poll_url":"/v1/github/runs/00000000-0000-4000-8000-0000000000e1/status"}
+{"status":"passed","conclusion":"success"}
+EOF_I
+  : > "${calls}"
+  make_mock_curl "${mock}"
+  I_EXIT=0
+  env \
+    KIFAS_API_KEY="test-key-123" \
+    KIFAS_GATE_ID="" \
+    KIFAS_API_BASE="https://mock.kifas.io" \
+    KIFAS_POLL_INTERVAL_S="0" \
+    KIFAS_TIMEOUT_S="60" \
+    KIFAS_CURL="${mock}" \
+    MOCK_CURL_RESPONSES_FILE="${responses}" \
+    MOCK_CURL_CALLS_LOG="${calls}" \
+    GITHUB_REPOSITORY="acme/web" \
+    GITHUB_SHA="2222222222222222222222222222222222222222" \
+    GITHUB_RUN_ID="99" \
+    GITHUB_REF="" \
+    GITHUB_REF_NAME="" \
+    GITHUB_EVENT_NAME="${event_name}" \
+    GITHUB_EVENT_PATH="${event_file}" \
+    "$@" \
+    bash "${RUN_SH}" > "${TMP_DIR}/${name}.out" 2>&1 || I_EXIT=$?
+  I_BODY="$(tr -d '[:space:]' < "${calls}")"
+}
+
+run_identity id_pull_request pull_request \
+  '{"number":42,"pull_request":{"number":42,"head":{"ref":"feature/new-flow","sha":"1111111111111111111111111111111111111111"}}}' \
+  GITHUB_REF="refs/pull/42/merge" GITHUB_REF_NAME="42/merge"
+ok=1
+[[ "${I_EXIT}" -eq 0 ]] || ok=0
+grep -q '"git":{"repo":"acme/web","branch":"feature/new-flow","pr_number":42,"head_sha":"1111111111111111111111111111111111111111"}' <<< "${I_BODY}" || ok=0
+# The signed-identity fields are exactly what they were.
+grep -q '"branch":"42/merge","pr_number":42' <<< "${I_BODY}" || ok=0
+check git_identity_pull_request "${ok}" "(exit=${I_EXIT})"
+
+run_identity id_push push \
+  '{"ref":"refs/heads/main","after":"3333333333333333333333333333333333333333"}' \
+  GITHUB_REF="refs/heads/main" GITHUB_REF_NAME="main"
+ok=1
+grep -q '"git":{"repo":"acme/web","branch":"main","pr_number":null,"head_sha":"3333333333333333333333333333333333333333"}' <<< "${I_BODY}" || ok=0
+check git_identity_push "${ok}" "(exit=${I_EXIT})"
+
+run_identity id_deploy_branch deployment_status \
+  '{"deployment":{"ref":"feature/new-flow","sha":"4444444444444444444444444444444444444444","environment":"Preview"},"deployment_status":{"state":"success","environment_url":"https://preview.example.com"}}'
+ok=1
+grep -q '"git":{"repo":"acme/web","branch":"feature/new-flow","pr_number":null,"head_sha":"4444444444444444444444444444444444444444"}' <<< "${I_BODY}" || ok=0
+check git_identity_deployment_status_branch_ref "${ok}" "(exit=${I_EXIT})"
+
+run_identity id_deploy_sha deployment_status \
+  '{"deployment":{"ref":"5555555555555555555555555555555555555555","sha":"5555555555555555555555555555555555555555"},"deployment_status":{"state":"success"}}'
+ok=1
+grep -q '"git":{"repo":"acme/web","branch":null,"pr_number":null,"head_sha":"5555555555555555555555555555555555555555"}' <<< "${I_BODY}" || ok=0
+check git_identity_deployment_status_commit_ref "${ok}" "(exit=${I_EXIT})"
+
+run_identity id_workflow_run workflow_run \
+  '{"workflow_run":{"head_branch":"feature/new-flow","head_sha":"6666666666666666666666666666666666666666","pull_requests":[{"number":7}]}}' \
+  GITHUB_REF="refs/heads/main" GITHUB_REF_NAME="main"
+ok=1
+grep -q '"git":{"repo":"acme/web","branch":"feature/new-flow","pr_number":7,"head_sha":"6666666666666666666666666666666666666666"}' <<< "${I_BODY}" || ok=0
+check git_identity_workflow_run "${ok}" "(exit=${I_EXIT})"
+
+run_identity id_workflow_run_fork workflow_run \
+  '{"workflow_run":{"head_branch":"patch-1","head_sha":"7777777777777777777777777777777777777777","pull_requests":[]}}' \
+  GITHUB_REF="refs/heads/main" GITHUB_REF_NAME="main"
+ok=1
+grep -q '"git":{"repo":"acme/web","branch":"patch-1","pr_number":null,"head_sha":"7777777777777777777777777777777777777777"}' <<< "${I_BODY}" || ok=0
+check git_identity_workflow_run_from_fork "${ok}" "(exit=${I_EXIT})"
+
+run_identity id_dispatch workflow_dispatch '{}' \
+  GITHUB_REF="refs/tags/v1.0.0" GITHUB_REF_NAME="v1.0.0"
+ok=1
+grep -q '"git":{"repo":"acme/web","branch":null,"pr_number":null,"head_sha":"2222222222222222222222222222222222222222"}' <<< "${I_BODY}" || ok=0
+check git_identity_tag_is_no_branch "${ok}" "(exit=${I_EXIT})"
+
+# ---------------------------------------------------------------------------
+# Outcome: the Action reports Kifas's final outcome, not the raw result
+# ---------------------------------------------------------------------------
+# run_outcome <name> <responses> [extra env...] — sets O_EXIT, O_OUT, O_CALLS, O_SUMMARY, O_OUTPUTS.
+run_outcome() {
+  local name="$1" responses="$2"
+  shift 2
+  O_OUT="${TMP_DIR}/${name}.out"
+  O_CALLS="${TMP_DIR}/${name}.calls"
+  O_SUMMARY="${TMP_DIR}/${name}.summary"
+  O_OUTPUTS="${TMP_DIR}/${name}.outputs"
+  : > "${O_CALLS}"; : > "${O_SUMMARY}"; : > "${O_OUTPUTS}"
+  local mock="${TMP_DIR}/curl_${name}"
+  make_mock_curl "${mock}"
+  O_EXIT=0
+  env \
+    KIFAS_API_KEY="test-key-123" \
+    KIFAS_GATE_ID="" \
+    KIFAS_API_BASE="https://mock.kifas.io" \
+    KIFAS_POLL_INTERVAL_S="0" \
+    KIFAS_TIMEOUT_S="60" \
+    KIFAS_CURL="${mock}" \
+    KIFAS_GITHUB_TOKEN="" \
+    MOCK_CURL_RESPONSES_FILE="${responses}" \
+    MOCK_CURL_CALLS_LOG="${O_CALLS}" \
+    GITHUB_STEP_SUMMARY="${O_SUMMARY}" \
+    GITHUB_OUTPUT="${O_OUTPUTS}" \
+    GITHUB_REPOSITORY="acme/web" \
+    GITHUB_SHA="2222222222222222222222222222222222222222" \
+    GITHUB_REF="refs/heads/main" \
+    GITHUB_REF_NAME="main" \
+    GITHUB_RUN_ID="99" \
+    GITHUB_EVENT_NAME="push" \
+    GITHUB_EVENT_PATH="" \
+    "$@" \
+    bash "${RUN_SH}" > "${O_OUT}" 2>&1 || O_EXIT=$?
+}
+
+TRIGGER_WAIT='{"run_id":"00000000-0000-4000-8000-0000000000f1","poll_url":"/v1/github/runs/00000000-0000-4000-8000-0000000000f1/status","check":{"posted":false,"url":null},"wait_for_outcome":true}'
+TRIGGER_CHECK='{"run_id":"00000000-0000-4000-8000-0000000000f2","poll_url":"/v1/github/runs/00000000-0000-4000-8000-0000000000f2/status","check":{"posted":true,"url":"https://github.com/acme/web/runs/1"},"wait_for_outcome":false}'
+
+# A posted check and wait-for-result: false → the job stops after dispatch.
+R_O1="${TMP_DIR}/o1.txt"
+printf '%s\n' "${TRIGGER_CHECK}" > "${R_O1}"
+run_outcome outcome_exit_after_dispatch "${R_O1}" KIFAS_WAIT_FOR_RESULT="false"
+ok=1
+[[ "${O_EXIT}" -eq 0 ]] || ok=0
+[[ "$(grep -c '/status' "${O_CALLS}" || true)" -eq 0 ]] || ok=0
+grep -q 'https://github.com/acme/web/runs/1' "${O_SUMMARY}" || ok=0
+check outcome_exits_after_dispatch_when_asked "${ok}" "(exit=${O_EXIT})"
+
+# A posted check but the default wait-for-result → the job still waits for the result.
+R_O2="${TMP_DIR}/o2.txt"
+cat > "${R_O2}" << 'EOF_O'
+{"run_id":"00000000-0000-4000-8000-0000000000f2","poll_url":"/v1/github/runs/00000000-0000-4000-8000-0000000000f2/status","check":{"posted":true,"url":"https://github.com/acme/web/runs/1"},"wait_for_outcome":false}
+{"status":"passed","conclusion":"success","outcome":{"settled":true,"conclusion":"success","title":"Kifas · passed","summary":"All 2 tests passed."}}
+EOF_O
+run_outcome outcome_default_waits "${R_O2}"
+ok=1
+[[ "${O_EXIT}" -eq 0 ]] || ok=0
+[[ "$(grep -c '/status' "${O_CALLS}" || true)" -eq 1 ]] || ok=0
+grep -qx 'conclusion=success' "${O_OUTPUTS}" || ok=0
+check outcome_default_still_waits_for_the_result "${ok}" "(exit=${O_EXIT})"
+
+# Unsettled at the end of the tests → keeps polling until the outcome settles.
+R_O3="${TMP_DIR}/o3.txt"
+{
+  printf '%s\n' "${TRIGGER_WAIT}"
+  printf '%s\n' '{"status":"failed","conclusion":"failure","outcome":{"settled":false,"conclusion":"neutral","title":"Kifas · still checking","summary":"Kifas is working on 1 test that failed."}}'
+  printf '%s\n' '{"status":"failed","conclusion":"failure","outcome":{"settled":true,"conclusion":"action_required","title":"Kifas · action required","summary":"Your app changed in 1 place. Kifas has an update ready for it, and nothing changes until you approve it."}}'
+} > "${R_O3}"
+run_outcome outcome_waits_to_settle "${R_O3}"
+ok=1
+[[ "${O_EXIT}" -eq 1 ]] || ok=0
+[[ "$(grep -c '/status' "${O_CALLS}" || true)" -eq 2 ]] || ok=0
+grep -q '### Kifas · action required' "${O_SUMMARY}" || ok=0
+grep -qx 'conclusion=action_required' "${O_OUTPUTS}" || ok=0
+grep -qx 'suite-result=failed' "${O_OUTPUTS}" || ok=0
+check outcome_waits_until_settled_then_reports_it "${ok}" "(exit=${O_EXIT})"
+
+# On us is neutral: it never fails the customer's job.
+R_O4="${TMP_DIR}/o4.txt"
+{
+  printf '%s\n' "${TRIGGER_WAIT}"
+  printf '%s\n' "{\"status\":\"failed\",\"conclusion\":\"failure\",\"outcome\":{\"settled\":true,\"conclusion\":\"neutral\",\"title\":\"Kifas · on us\",\"summary\":\"Kifas had a problem on our side and couldn't finish. This says nothing about your code.\"}}"
+} > "${R_O4}"
+run_outcome outcome_neutral "${R_O4}"
+ok=1
+[[ "${O_EXIT}" -eq 0 ]] || ok=0
+grep -q 'This says nothing about your code.' "${O_SUMMARY}" || ok=0
+grep -qx 'conclusion=neutral' "${O_OUTPUTS}" || ok=0
+check outcome_on_us_is_neutral_and_passes_the_job "${ok}" "(exit=${O_EXIT})"
+
+# The wait is bounded: with 0 minutes it reports the unsettled outcome at once.
+R_O5="${TMP_DIR}/o5.txt"
+{
+  printf '%s\n' "${TRIGGER_WAIT}"
+  printf '%s\n' '{"status":"failed","conclusion":"failure","outcome":{"settled":false,"conclusion":"neutral","title":"Kifas · still checking","summary":"Kifas is working on 1 test that failed."}}'
+} > "${R_O5}"
+run_outcome outcome_wait_bounded "${R_O5}" KIFAS_OUTCOME_WAIT_MINUTES="0"
+ok=1
+[[ "${O_EXIT}" -eq 0 ]] || ok=0
+[[ "$(grep -c '/status' "${O_CALLS}" || true)" -eq 1 ]] || ok=0
+grep -q '### Kifas · still checking' "${O_SUMMARY}" || ok=0
+check outcome_wait_is_bounded "${ok}" "(exit=${O_EXIT})"
+
+# An older server without outcome: report_markdown is printed as is, never bullet-split.
+R_O6="${TMP_DIR}/o6.txt"
+{
+  printf '%s\n' "${TRIGGER_WAIT}"
+  printf '%s\n' '{"status":"failed","conclusion":"failure","report":"❌ Sign up — Timeout.\nCall log:","report_markdown":"- ❌ Sign up\n\n  ```\n  Timeout.\n  Call log:\n  ```"}'
+} > "${R_O6}"
+run_outcome outcome_fenced_report "${R_O6}"
+ok=1
+[[ "${O_EXIT}" -eq 1 ]] || ok=0
+grep -qx '  ```' "${O_SUMMARY}" || ok=0
+grep -qx '  Call log:' "${O_SUMMARY}" || ok=0
+! grep -q '^- Call log:' "${O_SUMMARY}" || ok=0
+check outcome_multiline_error_is_fenced_not_bulleted "${ok}" "(exit=${O_EXIT})"
+
 echo "Results: ${PASS} passed, ${FAIL} failed"
 if [[ "${FAIL}" -gt 0 ]]; then
   exit 1

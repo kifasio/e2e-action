@@ -47,6 +47,19 @@ inputs:
     description: Kifas API base URL.
     required: false
     default: https://api.kifas.io
+  outcome-wait-minutes:
+    description: >-
+      After the tests finish, how many minutes to wait for Kifas's final outcome
+      (why a test failed, or an update to a test proven and waiting for you).
+    required: false
+    default: '10'
+  wait-for-result:
+    description: >-
+      'false' ends this job right after the tests start when Kifas can post the
+      Kifas check on the commit (the GitHub App's Checks permission). Require the
+      Kifas check instead of this job before setting it.
+    required: false
+    default: 'true'
   github-token:
     description: >-
       Token used to post the run link + result as a PR comment. Defaults to the
@@ -66,6 +79,12 @@ outputs:
   suite-run-id:
     description: The id of the Kifas suite run this job started.
     value: ${{ steps.kifas.outputs.suite-run-id }}
+  conclusion:
+    description: >-
+      Kifas's final outcome as a check conclusion: success, failure, neutral
+      (a problem on Kifas's side), action_required (an update waits for your
+      approval) or cancelled. Empty when no outcome was reached.
+    value: ${{ steps.kifas.outputs.conclusion }}
 
 runs:
   using: composite
@@ -84,3 +103,5 @@ runs:
         KIFAS_PARAMS: ${{ inputs.params }}
         KIFAS_API_BASE: ${{ inputs.api-base }}
         KIFAS_GITHUB_TOKEN: ${{ inputs.github-token }}
+        KIFAS_OUTCOME_WAIT_MINUTES: ${{ inputs.outcome-wait-minutes }}
+        KIFAS_WAIT_FOR_RESULT: ${{ inputs.wait-for-result }}

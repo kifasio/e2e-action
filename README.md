@@ -1,7 +1,7 @@
 # kifasio/e2e-action
 
 Trigger a [Kifas](https://kifas.io) run and block until it completes.
-The GitHub job's pass/fail **is** the required check — exit 0 means the tests passed, exit 1 means they failed.
+The GitHub job's pass/fail **is** the required check — exit 0 means Kifas's outcome is `success` or `neutral` (a problem on Kifas's side never fails your job), exit 1 means a bug, an update waiting for your approval, a stopped run, a timeout, or a failed API call.
 
 ## Quick start
 
@@ -83,6 +83,8 @@ A call Kifas could not answer is retried for the same run attempt; Kifas admits 
 | `suite` | No | `''` | Suite to run: its slug (`smoke`), `project/slug` (`web/smoke`), or its id. Defaults to the project's **All workflows** suite — every test you have. |
 | `params` | No | `''` | Suite parameters, one `key=value` per line. `base_url` comes from `target-url` and `app_build_id` from `app-artifact`; anything set here wins. |
 | `api-base` | No | `https://api.kifas.io` | Kifas API base URL. Override for self-hosted or staging. |
+| `outcome-wait-minutes` | No | `10` | After the tests finish, how long to wait for Kifas's final outcome: why a test failed, or an update to a test proven and waiting for you. |
+| `wait-for-result` | No | `true` | `false` ends the job right after the tests start when Kifas posts the **Kifas** check on the commit. Require that check instead of this job first. |
 
 ## Outputs
 
@@ -90,21 +92,23 @@ A call Kifas could not answer is retried for the same run attempt; Kifas admits 
 |--------|-------------|
 | `suite-run-id` | The Kifas suite run this job started. |
 | `suite-result` | `passed`, `failed`, `aborted` or `unreported` (its tests reported no result) — the suite's terminal result. Set only when the run finished; a trigger failure, a timeout or a cancelled job leaves it empty, so a check that requires `passed` stays red. |
+| `conclusion` | Kifas's final outcome: `success`, `failure`, `neutral` (a problem on Kifas's side), `action_required` (an update waits for your approval) or `cancelled`. |
 
 ## Behaviour
 
 1. Reads `GITHUB_SHA`, `GITHUB_REPOSITORY`, `GITHUB_REF_NAME`, `GITHUB_RUN_ID`, and the PR number (from `GITHUB_REF` or the event payload) automatically from the runner environment.
 2. POSTs to `{api-base}/v1/github/runs` with the run context and your inputs. Kifas runs the whole suite — every test in it, in the suite's own concurrency policy.
-3. Polls the returned `poll_url` every 5 s until the suite reaches a terminal status (`passed` | `failed` | `aborted`), timing out after 20 minutes.
-4. Exits 0 if `conclusion === 'success'`; exits 1 otherwise with an annotated error message, and also when the job is cancelled.
-5. The PR comment and the step summary list one line per test in the suite (`✅ name` / `❌ name — why`), plus the pass/fail counts.
+3. Polls the returned `poll_url` every 5 s until the suite finishes (timing out after 20 minutes), then waits up to `outcome-wait-minutes` for Kifas's final outcome.
+4. Exits 0 when the outcome is `success` or `neutral` (a problem on Kifas's side never fails your job); exits 1 for a bug, an update waiting for your approval, a stopped run, a timeout, or a failed API call.
+5. The PR comment and the step summary show the outcome, one line per test, with any test update as a diff and any multi-line error kept whole in a code block.
+6. With the GitHub App's Checks permission, Kifas also posts the result as the **Kifas** check on the commit and updates it when you approve or reject a test update in Kifas.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Kifas tests **passed** (`conclusion: success`). |
-| `1` | Kifas tests **failed**, timed out, or the API call errored. |
+| `0` | Kifas's outcome is `success` (tests passed, possibly with an update) or `neutral` (a problem on Kifas's side — never fails your job). |
+| `1` | Kifas's outcome is `failure` (a bug) or `action_required` (an update waits for your approval), the run was `cancelled`, it timed out, or the API call errored. |
 
 ## Requirements
 

@@ -38,6 +38,10 @@ set -euo pipefail
 #   KIFAS_CURL              — curl binary override for testing (default: curl)
 #   KIFAS_TRIGGER_ATTEMPTS  — gate calls retried after a lost or 5xx answer (default: 3)
 #   KIFAS_RETRY_DELAY_S     — seconds between those retries (default: 5)
+#   KIFAS_OUTCOME_WAIT_MINUTES — after the tests finish, how long to wait for
+#                               Kifas's final outcome (default: 10)
+#   KIFAS_WAIT_FOR_RESULT     — "false" ends the job right after dispatch when
+#                               Kifas posts the Kifas check (default: true)
 #
 # Step outputs (written to $GITHUB_OUTPUT):
 #   suite-run-id — the Kifas suite run this job started
@@ -60,6 +64,9 @@ set -euo pipefail
 : "${KIFAS_CURL:=curl}"
 : "${KIFAS_TRIGGER_ATTEMPTS:=3}"
 : "${KIFAS_RETRY_DELAY_S:=5}"
+: "${KIFAS_OUTCOME_WAIT_MINUTES:=10}"
+: "${KIFAS_WAIT_FOR_RESULT:=true}"
+if [[ ! "${KIFAS_OUTCOME_WAIT_MINUTES}" =~ ^[0-9]+$ ]]; then KIFAS_OUTCOME_WAIT_MINUTES=10; fi
 
 GH_API="${GITHUB_API_URL:-https://api.github.com}"
 COMMENT_MARKER="<!-- kifas-e2e-run -->"
@@ -104,6 +111,53 @@ if [[ -f "${GITHUB_EVENT_PATH:-}" ]]; then
   HEAD_SHA="$(jq -r '.pull_request.head.sha // .merge_group.head_sha // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)"
 fi
 HEAD_SHA="${HEAD_SHA:-${COMMIT_SHA}}"
+
+# ---------------------------------------------------------------------------
+# What this run tests, for Kifas's records and its check on the commit: the
+# branch, the pull request and the commit. It is descriptive and separate from
+# the signed identity above, which stays exactly as GitHub reports it. An event
+# that names no pull request leaves it empty; Kifas looks it up from the commit.
+# ---------------------------------------------------------------------------
+event_field() {
+  [[ -f "${GITHUB_EVENT_PATH:-}" ]] || return 0
+  jq -r "$1 // empty" "${GITHUB_EVENT_PATH}" 2>/dev/null || true
+}
+branch_of_ref() {
+  case "$1" in
+    refs/heads/*) printf '%s' "${1#refs/heads/}" ;;
+    refs/* | "") ;;
+    *) if [[ ! "$1" =~ ^[0-9a-fA-F]{40}$ ]]; then printf '%s' "$1"; fi ;;
+  esac
+}
+GIT_BRANCH=""
+GIT_PR_NUMBER=""
+GIT_HEAD_SHA=""
+case "${EVENT_NAME}" in
+  pull_request | pull_request_target)
+    GIT_BRANCH="$(event_field '.pull_request.head.ref')"
+    GIT_PR_NUMBER="$(event_field '.pull_request.number')"
+    GIT_HEAD_SHA="$(event_field '.pull_request.head.sha')"
+    ;;
+  deployment_status | deployment)
+    GIT_BRANCH="$(branch_of_ref "$(event_field '.deployment.ref')")"
+    GIT_HEAD_SHA="$(event_field '.deployment.sha')"
+    ;;
+  workflow_run)
+    GIT_BRANCH="$(event_field '.workflow_run.head_branch')"
+    GIT_PR_NUMBER="$(event_field '.workflow_run.pull_requests[0].number')"
+    GIT_HEAD_SHA="$(event_field '.workflow_run.head_sha')"
+    ;;
+  push)
+    GIT_BRANCH="$(branch_of_ref "${GITHUB_REF:-}")"
+    GIT_HEAD_SHA="$(event_field '.after')"
+    ;;
+  *)
+    GIT_BRANCH="$(branch_of_ref "${GITHUB_REF:-}")"
+    ;;
+esac
+GIT_HEAD_SHA="${GIT_HEAD_SHA:-${COMMIT_SHA}}"
+if [[ ! "${GIT_PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then GIT_PR_NUMBER=""; fi
+if [[ ! "${GIT_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then GIT_HEAD_SHA=""; fi
 
 MANAGED=0
 if [[ -n "${KIFAS_GATE_ID}" ]]; then
@@ -350,6 +404,7 @@ echo "repo:        ${REPO}"
 echo "commit_sha:  ${COMMIT_SHA}"
 echo "branch:      ${BRANCH}"
 echo "pr_number:   ${PR_NUMBER:-<none>}"
+echo "git:         branch=${GIT_BRANCH:-<none>} pr=${GIT_PR_NUMBER:-<none>} commit=${GIT_HEAD_SHA:0:7}"
 echo "run_id:      ${RUN_ID}"
 if [[ "${MANAGED}" -eq 1 ]]; then
   echo "gate_id:     ${KIFAS_GATE_ID}"
@@ -398,6 +453,9 @@ PAYLOAD="$(jq -n \
   --arg event         "${EVENT_NAME}" \
   --arg head_sha      "${HEAD_SHA}" \
   --arg tested_sha    "${TESTED_SHA}" \
+  --arg git_branch    "${GIT_BRANCH}" \
+  --arg git_pr_number "${GIT_PR_NUMBER}" \
+  --arg git_head_sha  "${GIT_HEAD_SHA}" \
   '{
     target_url:   (if $target_url   != "" then $target_url   else null end),
     app_artifact: (if $app_artifact != "" then $app_artifact else null end),
@@ -415,7 +473,13 @@ PAYLOAD="$(jq -n \
       workflow_sha:  (if $workflow_sha  != "" then $workflow_sha  else null end),
       event:         (if $event         != "" then $event         else null end),
       head_sha:      (if $head_sha      != "" then $head_sha      else null end),
-      tested_sha:    (if $tested_sha    != "" then $tested_sha    else null end)
+      tested_sha:    (if $tested_sha    != "" then $tested_sha    else null end),
+      git: {
+        repo:      $repo,
+        branch:    (if $git_branch    != "" then $git_branch                      else null end),
+        pr_number: (if $git_pr_number != "" then ($git_pr_number | tonumber)      else null end),
+        head_sha:  (if $git_head_sha  != "" then ($git_head_sha | ascii_downcase) else null end)
+      }
     }
   }
   + (if $suite != "" then { suite: $suite } else {} end)
@@ -510,6 +574,20 @@ else
   echo "Kifas run: ${KIFAS_RUN_ID} (dashboard link unavailable; status API: ${POLL_URL})"
 fi
 
+# Kifas posts the result as the Kifas check on this commit when the GitHub App
+# may; a workflow that requires that check instead of this job can stop here.
+WAIT_FOR_OUTCOME="$(echo "${TRIGGER_RESPONSE}" | jq -r 'if .wait_for_outcome == false then "no" else "yes" end' 2>/dev/null || echo yes)"
+CHECK_URL="$(echo "${TRIGGER_RESPONSE}" | jq -r '.check.url // empty' 2>/dev/null || true)"
+if [[ "${KIFAS_WAIT_FOR_RESULT}" == "false" && "${WAIT_FOR_OUTCOME}" == "no" ]]; then
+  CHECK_LINK="the Kifas check on this commit"
+  if [[ -n "${CHECK_URL}" ]]; then
+    CHECK_LINK="$(printf '[the Kifas check](%s) on this commit' "${CHECK_URL}")"
+  fi
+  write_step_summary "$(printf '### Kifas · running\n\nKifas posts the result as %s, including any test it updates to match your change.\n\n%s' "${CHECK_LINK}" "$(run_link)")"
+  echo "Kifas reports the result as the Kifas check on this commit${CHECK_URL:+: ${CHECK_URL}}"
+  exit 0
+fi
+
 # Report #1: run started.
 notify "$(printf '### 🔄 Kifas E2E — run started\n\n**Status:** running\n\n%s\n\n<sub>commit `%s`</sub>' "$(run_link)" "${COMMIT_SHA:0:7}")"
 
@@ -518,12 +596,13 @@ notify "$(printf '### 🔄 Kifas E2E — run started\n\n**Status:** running\n\n%
 # ---------------------------------------------------------------------------
 START_TS="$(date +%s)"
 LAST_STATUS=""
+SETTLE_START_TS=""
 
 while true; do
   NOW_TS="$(date +%s)"
   ELAPSED=$(( NOW_TS - START_TS ))
 
-  if (( ELAPSED >= KIFAS_TIMEOUT_S )); then
+  if (( ELAPSED >= KIFAS_TIMEOUT_S )) && [[ -z "${SETTLE_START_TS}" ]]; then
     notify "$(printf '### ⏱️ Kifas E2E — timed out\n\n**Result:** timed out after %ss\n\n%s' "${KIFAS_TIMEOUT_S}" "$(run_link)")"
     echo "::error::Kifas run timed out after ${KIFAS_TIMEOUT_S}s (run_id=${KIFAS_RUN_ID})" >&2
     exit 1
@@ -554,10 +633,26 @@ while true; do
 
   case "${STATUS}" in
     passed|completed|failed|aborted|unreported)
+      # The tests are done; Kifas may still be deciding what a failure means or
+      # proving an update. Wait for that, within the outcome budget.
+      OUTCOME_STATE="$(echo "${POLL_RESPONSE}" | jq -r 'if (.outcome | type) != "object" then "none" elif .outcome.settled == true then "settled" else "unsettled" end')"
+      if [[ "${OUTCOME_STATE}" == "unsettled" ]]; then
+        if [[ -z "${SETTLE_START_TS}" ]]; then
+          SETTLE_START_TS="${NOW_TS}"
+          echo "[+${ELAPSED}s] tests finished; waiting up to ${KIFAS_OUTCOME_WAIT_MINUTES} min for Kifas to finish checking"
+        fi
+        if (( NOW_TS - SETTLE_START_TS < KIFAS_OUTCOME_WAIT_MINUTES * 60 )); then
+          sleep "${KIFAS_POLL_INTERVAL_S}"
+          continue
+        fi
+        echo "Kifas is still checking; reporting what it knows now."
+      fi
+
       # Prefer the run_url from the poll (authoritative); fall back to trigger's.
       RUN_URL_POLL="$(echo "${POLL_RESPONSE}" | jq -r '.run_url // empty')"
       if [[ -n "${RUN_URL_POLL}" ]]; then KIFAS_RUN_URL="${RUN_URL_POLL}"; fi
       REPORT="$(echo "${POLL_RESPONSE}" | jq -r '.report // empty')"
+      REPORT_MD="$(echo "${POLL_RESPONSE}" | jq -r '.report_markdown // empty')"
       # Why a single run ended the way it did — e.g. an `action_required` test
       # waiting on a person to review it before it is published.
       REASON="$(echo "${POLL_RESPONSE}" | jq -r '.reason // empty')"
@@ -578,13 +673,42 @@ while true; do
       if [[ -n "${REASON}" ]]; then
         echo "Reason: ${REASON}"
       fi
+
+      # Kifas's final outcome: success, a test updated, waiting for you, a bug,
+      # or on us. On us is neutral and never fails the job.
+      OUTCOME_CONCLUSION=""
+      if [[ "${OUTCOME_STATE}" != "none" ]]; then
+        OUTCOME_CONCLUSION="$(echo "${POLL_RESPONSE}" | jq -r '.outcome.conclusion // empty')"
+      fi
+      if [[ -n "${OUTCOME_CONCLUSION}" ]]; then
+        OUTCOME_TITLE="$(echo "${POLL_RESPONSE}" | jq -r '.outcome.title // "Kifas"')"
+        OUTCOME_SUMMARY="$(echo "${POLL_RESPONSE}" | jq -r '.outcome.summary // empty')"
+        set_output conclusion "${OUTCOME_CONCLUSION}"
+        echo "${OUTCOME_TITLE}"
+        if [[ -n "${OUTCOME_SUMMARY}" ]]; then echo "${OUTCOME_SUMMARY}"; fi
+        notify "$(printf '### %s\n\n%s\n\n%s' "${OUTCOME_TITLE}" "${OUTCOME_SUMMARY}" "$(run_link)")"
+        case "${OUTCOME_CONCLUSION}" in
+          success | neutral)
+            echo "Kifas check PASSED (${OUTCOME_CONCLUSION})."
+            exit 0
+            ;;
+          *)
+            echo "::error::Kifas check FAILED — run_id=${KIFAS_RUN_ID} conclusion=${OUTCOME_CONCLUSION}" >&2
+            exit 1
+            ;;
+        esac
+      fi
+
       if [[ -n "${REPORT}" ]]; then
         echo "${REPORT}"
       fi
 
-      # The report is one line per workflow in the suite ("✅ name" / "❌ name — why").
+      # Prefer the Markdown report, printed as is: a multi-line error stays one
+      # fenced block. An older server sends only the plain lines.
       REPORT_BLOCK=""
-      if [[ -n "${REPORT}" ]]; then
+      if [[ -n "${REPORT_MD}" ]]; then
+        REPORT_BLOCK="$(printf '\n\n%s' "${REPORT_MD}")"
+      elif [[ -n "${REPORT}" ]]; then
         REPORT_BLOCK="$(printf '\n\n%s' "$(echo "${REPORT}" | sed 's/^/- /')")"
       fi
       REASON_BLOCK=""
