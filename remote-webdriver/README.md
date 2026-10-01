@@ -167,6 +167,40 @@ Option A into your config as well, and Option B handles the rest.
 Either way, `appium:app` must be the `kifas://build/<uuid>` value in
 `KIFAS_APP` — a BrowserStack `bs://` id is rejected on purpose.
 
+### Putting sessions in this job's build
+
+Each session joins the build this action opened when either is true:
+
+- it names the build exactly: `'kifas:options': { buildId: process.env.KIFAS_BUILD_ID }`;
+- its `bstack:options.buildName` equals the `build-name` input, the way
+  BrowserStack groups sessions by build name (`buildName: process.env.KIFAS_BUILD_NAME`),
+  and this is the only open build in the project with that name.
+
+A session joined by name lands in this job's build and suite even when its
+`projectName` names a different suite, or none. Builds whose job stopped without
+closing them are not joined once they have been idle for 6 hours.
+
+A session that joins no build is recorded in a build of its own, and carries a
+warning saying why: no open build has its name (`build_not_joined`), or more than
+one does (`build_name_ambiguous`; pass `kifas:options.buildId` to choose).
+
+### Reporting pass or fail
+
+Like BrowserStack, Kifas never guesses a test's result from how its session
+ended. A test that reports nothing reads **Unreported**, and a build whose tests
+all reported nothing reads **Unreported** too. Report the result the way you
+would on BrowserStack, for example in a WebdriverIO `afterTest` hook:
+
+```js
+afterTest: async (test, context, { passed, error }) => {
+  const status = passed ? 'passed' : 'failed'
+  const reason = error?.message ?? ''
+  await browser.execute(
+    `browserstack_executor: ${JSON.stringify({ action: 'setSessionStatus', arguments: { status, reason } })}`,
+  )
+},
+```
+
 ## Session idle timeout
 
 Kifas ends a session that receives no WebDriver command for too long and frees

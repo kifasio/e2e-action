@@ -58,8 +58,8 @@ inputs:
 outputs:
   suite-result:
     description: >-
-      The suite's terminal result — passed, failed or aborted — as Kifas
-      reported it when the run finished. Empty when no terminal result was
+      The suite's terminal result — passed, failed, aborted or unreported (its
+      tests reported no result) — as Kifas reported it when the run finished. Empty when no terminal result was
       reached (a trigger failure, a timeout or a cancelled job); starting the
       suite alone never sets it.
     value: ${{ steps.kifas.outputs.suite-result }}

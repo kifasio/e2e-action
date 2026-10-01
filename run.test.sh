@@ -691,6 +691,20 @@ grep -qx 'suite-run-id=50000000-0000-4000-8000-000000000018' "${M_OUTPUTS}" || o
 grep -qx 'suite-result=failed' "${M_OUTPUTS}" || ok=0
 check managed_failed_suite_exits_1_with_failed_result "${ok}" "(exit=${M_EXIT})"
 
+# Case 18b: a suite whose tests reported no result is finished, gates red and
+# reports suite-result=unreported instead of polling until the timeout.
+R18B="${TMP_DIR}/r18b.txt"
+cat > "${R18B}" << 'EOF_R'
+{"value":"oidc.jwt"}
+{"run_id":"50000000-0000-4000-8000-000000000019","poll_url":"/v1/github/runs/50000000-0000-4000-8000-000000000019/status"}
+{"status":"unreported","conclusion":"failure"}
+EOF_R
+run_managed managed_unreported "${R18B}" KIFAS_TARGET_URL="https://pr-42.preview.example.com" KIFAS_TIMEOUT_S=3
+ok=1
+[[ "${M_EXIT}" -eq 1 ]] || ok=0
+grep -qx 'suite-result=unreported' "${M_OUTPUTS}" || ok=0
+check managed_unreported_suite_exits_1_with_unreported_result "${ok}" "(exit=${M_EXIT})"
+
 # Case 19: without id-token permission a managed call stops before reaching
 # Kifas, with no outputs.
 R19="${TMP_DIR}/r19.txt"

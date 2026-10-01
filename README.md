@@ -89,7 +89,7 @@ A call Kifas could not answer is retried for the same run attempt; Kifas admits 
 | Output | Description |
 |--------|-------------|
 | `suite-run-id` | The Kifas suite run this job started. |
-| `suite-result` | `passed`, `failed` or `aborted` — the suite's terminal result. Set only when the run finished; a trigger failure, a timeout or a cancelled job leaves it empty, so a check that requires `passed` stays red. |
+| `suite-result` | `passed`, `failed`, `aborted` or `unreported` (its tests reported no result) — the suite's terminal result. Set only when the run finished; a trigger failure, a timeout or a cancelled job leaves it empty, so a check that requires `passed` stays red. |
 
 ## Behaviour
 

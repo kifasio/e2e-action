@@ -41,7 +41,7 @@ set -euo pipefail
 #
 # Step outputs (written to $GITHUB_OUTPUT):
 #   suite-run-id — the Kifas suite run this job started
-#   suite-result — passed | failed | aborted, set only from the run's terminal
+#   suite-result — passed | failed | aborted | unreported, set only from the run's terminal
 #                  result; never from the trigger succeeding
 # ---------------------------------------------------------------------------
 
@@ -553,7 +553,7 @@ while true; do
   fi
 
   case "${STATUS}" in
-    passed|completed|failed|aborted)
+    passed|completed|failed|aborted|unreported)
       # Prefer the run_url from the poll (authoritative); fall back to trigger's.
       RUN_URL_POLL="$(echo "${POLL_RESPONSE}" | jq -r '.run_url // empty')"
       if [[ -n "${RUN_URL_POLL}" ]]; then KIFAS_RUN_URL="${RUN_URL_POLL}"; fi
