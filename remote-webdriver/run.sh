@@ -90,7 +90,7 @@ server_reason() {
     403) reason='the API key is missing a required scope (session:create and workflow:run are both needed)' ;;
     404) reason='the requested Kifas resource was not found' ;;
     408) reason='the Kifas request timed out' ;;
-    413) reason='the app build exceeds the 500 MB upload limit' ;;
+    413) reason='the app build exceeds the 2 GB upload limit' ;;
     429) reason='Kifas rate limit exceeded' ;;
     5??) reason='Kifas is temporarily unavailable' ;;
     *) reason='Kifas rejected the request' ;;
@@ -187,8 +187,12 @@ if [[ "${KIFAS_LINK_GITHUB_BUILD}" == "true" ]]; then
 fi
 
 echo "::group::Kifas — upload app build"
+# A 2 GB app over a slow CI link outlasts any fixed total, so the upload aborts
+# only on a stall: under 100 KB/s for 5 minutes, which also covers the server
+# inspecting the app after the last byte. The 3-hour ceiling stops a trickle.
 UPLOAD_STATUS="$(
-  "${KIFAS_CURL}" --silent --show-error --config "${CURL_CONFIG}" --max-time 300 \
+  "${KIFAS_CURL}" --silent --show-error --config "${CURL_CONFIG}" \
+    --speed-limit 102400 --speed-time 300 --max-time 10800 \
     --output "${RESPONSE_BODY}" --write-out '%{http_code}' \
     -F "file=@${KIFAS_APP_PATH}" \
     "${IDENTITY_FORM[@]}" \

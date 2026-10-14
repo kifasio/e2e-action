@@ -280,6 +280,27 @@ else
   (( FAIL++ )) || true
 fi
 
+# Case 6b: a 2 GB app over a slow CI link outlasts any fixed total, so the
+# upload aborts on a stall, never on a short wall-clock cap.
+RESP6B="${TMP_DIR}/resp6b.txt"
+cat > "${RESP6B}" << 'EOF'
+{"app_build_id":"appbuild-6b","build_uri":"kifas://build/6b6b0000-0000-0000-0000-000000000000"}
+{"suiteRunId":"6b6b1111-0000-0000-0000-000000000000","suiteRunUrl":"https://app.kifas.io/x/y/z/runs/6b6b"}
+{"suiteRunId":"6b6b1111-0000-0000-0000-000000000000","closeRequested":true}
+EOF
+CALLS6B="${TMP_DIR}/calls6b.log"
+: > "${CALLS6B}"
+run_case "upload_stall_guard" "${RESP6B}" 0 "MOCK_CURL_CALLS_LOG=${CALLS6B}"
+UPLOAD_CALL="$(grep '/v1/app-builds/upload' "${CALLS6B}" || true)"
+if [[ "${UPLOAD_CALL}" == *"--speed-limit "* && "${UPLOAD_CALL}" == *"--speed-time "* \
+  && "${UPLOAD_CALL}" != *"--max-time 300 "* ]]; then
+  echo "  PASS  upload_aborts_on_stall_not_short_cap"
+  (( PASS++ )) || true
+else
+  echo "  FAIL  upload_aborts_on_stall_not_short_cap  (${UPLOAD_CALL})"
+  (( FAIL++ )) || true
+fi
+
 # Case 7: build close fails, but the test command already succeeded -> the
 # action still exits 0, and it warns (by suite run id) that the close failed
 # rather than staying silent about it.
@@ -604,7 +625,7 @@ env -i PATH="${PATH}" \
 ok14=1
 [[ "${actual_exit}" -ne 0 ]] || ok14=0
 grep -q 'HTTP 413' "${OUT14}" || ok14=0
-grep -q '500 MB' "${OUT14}" || ok14=0
+grep -q '2 GB' "${OUT14}" || ok14=0
 ! grep -q 'SECRET_PROXY_TOKEN_42' "${OUT14}" || ok14=0
 if [[ "${ok14}" -eq 1 ]]; then
   echo "  PASS  upload_non_json_error_reports_status_without_echoing_body"

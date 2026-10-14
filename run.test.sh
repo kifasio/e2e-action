@@ -798,6 +798,83 @@ grep -qx '::add-mask::X-Amz-Signature=s3cr3tsig&X-Amz-Expires=300' "${M_OUT}" ||
 grep -q '^App artifact URL will be fetched by Kifas: https://builds.example.com/app.apk$' "${M_OUT}" || ok=0
 check managed_signed_url_is_masked_and_never_logged "${ok}" "(exit=${M_EXIT})"
 
+# Case 23b: a 2 GB build over a slow CI link outlasts any fixed total, so a
+# managed upload aborts on a stall under a 3-hour ceiling; the trigger by build
+# id keeps its short bound.
+A23B="${TMP_DIR}/app23b.apk"
+echo "dummy" > "${A23B}"
+R23B="${TMP_DIR}/r23b.txt"
+cat > "${R23B}" << 'EOF_R'
+{"value":"oidc.upload"}
+{"app_build_id":"0d0d0d0d-0000-4000-8000-0000000023b0"}
+{"value":"oidc.trigger"}
+{"run_id":"50000000-0000-4000-8000-0000000023b0","poll_url":"/v1/github/runs/50000000-0000-4000-8000-0000000023b0/status"}
+{"status":"passed","conclusion":"success"}
+EOF_R
+run_managed managed_upload_stall_guard "${R23B}" KIFAS_APP_ARTIFACT="${A23B}"
+ok=1
+[[ "${M_EXIT}" -eq 0 ]] || ok=0
+UP="$(grep '/v1/app-builds/upload' "${M_CALLS}" || true)"
+[[ "${UP}" == *"--speed-limit 102400 "* && "${UP}" == *"--speed-time 300 "* ]] || ok=0
+[[ "${UP}" == *"--max-time 10800 "* ]] || ok=0
+[[ "${UP}" != *"--max-time 300 "* && "${UP}" != *"--max-time 600 "* ]] || ok=0
+TR="$(grep 'mock.kifas.io/v1/github/runs {' "${M_CALLS}" || true)"
+[[ "${TR}" == *"--max-time 30 "* && "${TR}" != *"--speed-"* ]] || ok=0
+check managed_upload_aborts_on_stall_not_short_cap "${ok}" "(exit=${M_EXIT} upload=${UP} trigger=${TR})"
+
+# Case 23c: when Kifas downloads the build from an address inside the trigger,
+# no bytes flow until it answers: a fixed bound, no stall guard, and never the
+# upload ceiling, even when that is raised.
+R23C="${TMP_DIR}/r23c.txt"
+cat > "${R23C}" << 'EOF_R'
+{"value":"oidc.jwt"}
+{"run_id":"50000000-0000-4000-8000-0000000023c0","poll_url":"/v1/github/runs/50000000-0000-4000-8000-0000000023c0/status"}
+{"status":"passed","conclusion":"success"}
+EOF_R
+run_managed managed_url_trigger_bound "${R23C}" \
+  KIFAS_APP_ARTIFACT="https://builds.example.com/app.apk" KIFAS_UPLOAD_TIMEOUT_S="7200"
+ok=1
+[[ "${M_EXIT}" -eq 0 ]] || ok=0
+TR="$(grep 'mock.kifas.io/v1/github/runs {' "${M_CALLS}" || true)"
+[[ "${TR}" == *"--max-time 1500 "* && "${TR}" != *"--speed-"* ]] || ok=0
+check managed_url_trigger_waits_for_server_download_bound "${ok}" "(exit=${M_EXIT} trigger=${TR})"
+
+# Case 23d: a legacy-key upload gets the same stall guard and still honours a
+# raised KIFAS_UPLOAD_TIMEOUT_S as its ceiling.
+A23D="${TMP_DIR}/app23d.apk"
+echo "dummy" > "${A23D}"
+R23D="${TMP_DIR}/r23d.txt"
+cat > "${R23D}" << 'EOF'
+{"app_build_id":"build-23d"}
+{"run_id":"00000000-0000-4000-8000-0000000023d0","poll_url":"/v1/github/runs/00000000-0000-4000-8000-0000000023d0/status"}
+{"status":"completed","conclusion":"success"}
+EOF
+CALLS23D="${TMP_DIR}/calls23d.log"
+: > "${CALLS23D}"
+run_case "legacy_upload_stall_guard" "${R23D}" 0 \
+  "MOCK_CURL_CALLS_LOG=${CALLS23D}" "KIFAS_APP_ARTIFACT=${A23D}" "KIFAS_UPLOAD_TIMEOUT_S=7200"
+UP="$(grep '/v1/app-builds/upload' "${CALLS23D}" || true)"
+ok=1
+[[ "${UP}" == *"--speed-limit 102400 "* && "${UP}" == *"--speed-time 300 "* ]] || ok=0
+[[ "${UP}" == *"--max-time 7200 "* ]] || ok=0
+check legacy_upload_aborts_on_stall_under_configured_ceiling "${ok}" "(upload=${UP})"
+
+# Case 23e: a legacy-key trigger with a build address also waits for Kifas to
+# download it, under the same fixed bound.
+R23E="${TMP_DIR}/r23e.txt"
+cat > "${R23E}" << 'EOF'
+{"run_id":"00000000-0000-4000-8000-0000000023e0","poll_url":"/v1/github/runs/00000000-0000-4000-8000-0000000023e0/status"}
+{"status":"completed","conclusion":"success"}
+EOF
+CALLS23E="${TMP_DIR}/calls23e.log"
+: > "${CALLS23E}"
+run_case "legacy_url_trigger_bound" "${R23E}" 0 \
+  "MOCK_CURL_CALLS_LOG=${CALLS23E}" "KIFAS_APP_ARTIFACT=https://builds.example.com/app.apk"
+TR="$(grep 'mock.kifas.io/v1/github/runs {' "${CALLS23E}" || true)"
+ok=1
+[[ "${TR}" == *"--max-time 1500 "* && "${TR}" != *"--speed-"* ]] || ok=0
+check legacy_url_trigger_waits_for_server_download_bound "${ok}" "(trigger=${TR})"
+
 # Case 24: a timeout reaches no terminal result: exit 1, the run id is known,
 # suite-result is never written.
 R24="${TMP_DIR}/r24.txt"

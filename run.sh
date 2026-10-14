@@ -34,7 +34,8 @@ set -euo pipefail
 # Tunable env (with sane defaults):
 #   KIFAS_POLL_INTERVAL_S   — seconds between polls (default: 5)
 #   KIFAS_TIMEOUT_S         — max seconds to wait (default: 1200 = 20 min)
-#   KIFAS_UPLOAD_TIMEOUT_S  — max seconds for the artifact upload (default: 300)
+#   KIFAS_UPLOAD_TIMEOUT_S  — ceiling in seconds for a direct artifact upload, which
+#                             also aborts after 5 minutes under 100 KB/s (default: 10800)
 #   KIFAS_CURL              — curl binary override for testing (default: curl)
 #   KIFAS_TRIGGER_ATTEMPTS  — gate calls retried after a lost or 5xx answer (default: 3)
 #   KIFAS_RETRY_DELAY_S     — seconds between those retries (default: 5)
@@ -60,7 +61,7 @@ set -euo pipefail
 : "${KIFAS_GITHUB_TOKEN:=}"
 : "${KIFAS_POLL_INTERVAL_S:=5}"
 : "${KIFAS_TIMEOUT_S:=1200}"
-: "${KIFAS_UPLOAD_TIMEOUT_S:=300}"
+: "${KIFAS_UPLOAD_TIMEOUT_S:=10800}"
 : "${KIFAS_CURL:=curl}"
 : "${KIFAS_TRIGGER_ATTEMPTS:=3}"
 : "${KIFAS_RETRY_DELAY_S:=5}"
@@ -341,6 +342,7 @@ elif [[ -n "${KIFAS_APP_ARTIFACT}" && "${MANAGED}" -eq 1 ]]; then
 
   echo "::group::Kifas — upload app artifact"
   if ! gate_request "${KIFAS_UPLOAD_TIMEOUT_S}" "" \
+    --speed-limit 102400 --speed-time 300 \
     -X POST \
     -F "file=@${KIFAS_APP_ARTIFACT}" \
     --form-string "gate_id=${KIFAS_GATE_ID}" \
@@ -379,6 +381,7 @@ elif [[ -n "${KIFAS_APP_ARTIFACT}" ]]; then
       --silent \
       --show-error \
       --fail-with-body \
+      --speed-limit 102400 --speed-time 300 \
       --max-time "${KIFAS_UPLOAD_TIMEOUT_S}" \
       -X POST \
       -H "Authorization: Bearer ${KIFAS_API_KEY}" \
@@ -489,13 +492,15 @@ PAYLOAD="$(jq -n \
 # ---------------------------------------------------------------------------
 # POST /v1/github/runs
 # ---------------------------------------------------------------------------
+# With a build address, Kifas downloads the build inside this call and no bytes
+# flow until it answers, so no stall guard: the server caps the download at 15
+# minutes (BODY_READ_TIMEOUT_MS in its URL ingest), plus up to 10 to inspect
+# and store it.
+TRIGGER_MAX_TIME=30
+if [[ -n "${APP_ARTIFACT_URL}" ]]; then
+  TRIGGER_MAX_TIME=1500
+fi
 if [[ "${MANAGED}" -eq 1 ]]; then
-  # Downloading a build from an address happens inside this call, so it gets
-  # the upload's time budget.
-  TRIGGER_MAX_TIME=30
-  if [[ -n "${APP_ARTIFACT_URL}" ]]; then
-    TRIGGER_MAX_TIME="${KIFAS_UPLOAD_TIMEOUT_S}"
-  fi
   if ! gate_request "${TRIGGER_MAX_TIME}" "${PAYLOAD}" \
     -X POST \
     -H "Content-Type: application/json" \
@@ -512,7 +517,7 @@ TRIGGER_RESPONSE="$(
     --silent \
     --show-error \
     --fail-with-body \
-    --max-time 30 \
+    --max-time "${TRIGGER_MAX_TIME}" \
     -X POST \
     -H "Authorization: Bearer ${KIFAS_API_KEY}" \
     -H "Content-Type: application/json" \
